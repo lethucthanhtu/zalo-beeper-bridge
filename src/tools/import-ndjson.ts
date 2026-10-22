@@ -164,7 +164,10 @@ function toParsed(row: JsonRecord, mapping: ThreadMapping): ParsedMessage | null
   } else if (text !== undefined) {
     content = { msgtype: "m.text", body: text };
   } else if (mediaUrl) {
-    content = { msgtype: "m.file", url: mediaUrl, body: firstString(row.fileName, row.title) || `[Zalo attachment: ${rawType}]`, originalType: rawType };
+    // A remote HTTPS URL is not a Matrix mxc:// URL; preserve it as text rather
+    // than emitting an invalid m.file event. Dedicated upload support can be added
+    // once the export's attachment schema is known.
+    content = { msgtype: "m.notice", body: `[Zalo attachment: ${rawType}] ${mediaUrl}` };
   } else {
     // Preserve unsupported message data as readable text rather than silently dropping it.
     content = { msgtype: "m.notice", body: `[Imported Zalo message type: ${rawType}]\n${JSON.stringify(row, null, 2).slice(0, 3000)}` };
