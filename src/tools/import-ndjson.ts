@@ -246,6 +246,7 @@ async function main(): Promise<void> {
 
   const store = new MappingStore(config.bridge.dbPath);
   const bridge = createBridge(config, async () => {}, async () => {});
+  await bridge.initialise();
   const branding = { ...config.network, stateKey: `${config.matrix.domain}/sh-zalo` };
   const puppets = new PuppetRegistry(bridge, store, config.matrix.domain);
   const portals = new PortalManager(bridge, store, puppets, config.matrix.owner, branding);
