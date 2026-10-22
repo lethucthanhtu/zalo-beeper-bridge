@@ -141,7 +141,7 @@ function extractMediaUrl(row: JsonRecord): string | undefined {
     media?.url, media?.href,
   );
 }
-function toParsed(row: JsonRecord, mapping: ThreadMapping, ownUid?: string): ParsedMessage | null {
+function toParsed(row: JsonRecord, mapping: ThreadMapping): ParsedMessage | null {
   const msgId = firstString(row.msgId, row.messageId, row.id);
   const senderId = firstString(row.fromUid, row.uidFrom, row.senderId, row.senderUid);
   const timestamp = timestampMs(row);
@@ -262,7 +262,7 @@ async function main(): Promise<void> {
       try { mapping = getMapping(file, rows, mappings, store); }
       catch (err) { console.error(`[import] ${(err as Error).message}`); failed += rows.length; continue; }
       for (const { row } of rows) {
-        const parsed = toParsed(row, mapping, options.ownUid);
+        const parsed = toParsed(row, mapping);
         if (!parsed) { invalid++; continue; }
         all.push(parsed);
       }
@@ -309,7 +309,6 @@ async function main(): Promise<void> {
         const content = { ...msg.content };
         if (content.msgtype === "sticker" && typeof content.mediaUrl === "string") {
           const stickerId = Number(content.stickerId);
-          const catId = Number(content.catId);
           // A sticker image URL must be hosted on the supported Zalo CDN; failures fall back to a notice.
           try {
             const { eventId } = await bridgeInboundSticker(intent, portal.room_id, stickerId, content.mediaUrl, config.bridge.mediaMaxBytes, extra);
@@ -325,7 +324,7 @@ async function main(): Promise<void> {
           try {
             const { eventId } = await bridgeInboundPhoto(intent, portal.room_id, {
               url: content.url,
-              caption: typeof content.body === "string" ? content.body : undefined,
+              caption: `[Imported from Zalo · original time: ${original}] ${typeof content.body === "string" ? content.body : ""}`,
             }, config.bridge.mediaMaxBytes, extra);
             store.recordMessage(msg.msgId, portal.room_id, eventId, "inbound", null, firstString(msg.raw.cliMsgId) ?? null, msg.senderId, String(msg.raw.msgType ?? ""));
           } catch (err) {
