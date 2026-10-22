@@ -85,6 +85,16 @@ npm run dev                               # the appservice on localhost:29350
 bbctl proxy -r registration.yaml          # proxies Beeper <-> the bridge over a websocket
 ```
 
+### Or: run it in a container (Docker / Podman)
+
+`compose.yaml` runs the bridge **and** `bbctl proxy` in one container — see [docs/container-deployment.md](docs/container-deployment.md):
+
+```bash
+mkdir container-config && cp config.yaml registration.yaml container-config/
+cp ~/.config/bbctl/config.json container-config/bbctl-config.json
+docker compose up -d --build        # or: podman compose up -d --build
+```
+
 ### 4. Log in to Zalo
 
 In Beeper, open a chat with the bridge bot `@sh-zalobot:beeper.local` and send:
@@ -107,7 +117,7 @@ Send these to the bridge bot in its management chat (owner only):
 | `login` | start QR login to Zalo |
 | `logout` | log out and clear saved credentials |
 | `status` | login state, listener state, uptime |
-| `sync` | pre-create portals for pinned conversations + top groups and backfill recent group history |
+| `sync` | create rooms for pinned chats + every group, fill empty rooms with the history Zalo allows this session (none from before login) |
 
 ## Architecture
 

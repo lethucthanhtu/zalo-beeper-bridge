@@ -107,7 +107,7 @@ const outbound = new OutboundHandler({
   matrixToken: asToken,
   bridgedEventIds,
 });
-const sync = new SyncManager({ zalo, portals, inbound });
+const sync = new SyncManager({ zalo, portals, inbound, store });
 ctx.runSync = () => sync.run();
 
 // Fail fast if computed ghost MXIDs cannot be registered under this appservice
@@ -141,7 +141,11 @@ zalo.on("dead", (reason) => {
   console.error(`[zalo] listener DEAD: ${reason} — send 'login' in the management room`);
   void publishZaloState("BAD_CREDENTIALS");
 });
-zalo.on("message", (msg) => inbound.handle(msg));
+zalo.on("message", (msg) => {
+  // Ids only, never content — enough to tell "Zalo sent nothing" from "bridging failed"
+  console.log(`[zalo] ${msg.isSelf ? "own" : "in"} ${msg.threadType} ${msg.content.kind} thread=${msg.threadId} msg=${msg.msgId}`);
+  inbound.handle(msg);
+});
 const presence = new PresenceHandler(store, puppets, zalo, config.matrix.owner, () => zalo.ownId);
 zalo.on("seen", (ev) => void presence.handleSeen(ev).catch((err) => console.warn("seen handling failed:", err)));
 // Typing mirroring disabled on request — re-enable by uncommenting:
@@ -154,6 +158,12 @@ await startBridge(bridge, config);
 await ensureNetworkIdentity(bridge, branding);
 // Backfill the network chip on portals created before branding existed
 void portals.rebrandExistingPortals().catch((err) => console.warn("portal rebrand failed:", err));
+// Repair portals: drop ones built from prefixed pinned ids, then join the owner into
+// any left at "invite" (invisible in Beeper) by the old broken owner auto-join
+void portals
+  .removeMalformedPortals()
+  .then(() => portals.joinOwnerToExistingPortals())
+  .catch((err) => console.warn("portal repair failed:", err));
 
 // Silent cookie re-login at startup; QR (via 'login' command) when absent/expired
 if (await zalo.loginFromSavedCredentials()) {

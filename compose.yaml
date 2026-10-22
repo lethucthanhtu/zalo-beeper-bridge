@@ -1,0 +1,31 @@
+# Works with both `docker compose` and `podman compose` (see docs/container-deployment.md).
+# Run exactly ONE instance per registration — a second bridge/proxy kicks the first.
+services:
+  zalo-bridge:
+    build: .
+    image: localhost/zalo-beeper-bridge:latest
+    container_name: zalo-beeper-bridge
+    restart: unless-stopped
+    init: false # tini is already PID 1 in the image
+    environment:
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      # Optional alternative to container-config/bbctl-config.json
+      MATRIX_ACCESS_TOKEN: ${MATRIX_ACCESS_TOKEN:-}
+      # 1 = log every Zalo websocket frame header (cmd/size only) for diagnosis
+      ZALO_WS_TRACE: ${ZALO_WS_TRACE:-0}
+    volumes:
+      # config.yaml, registration.yaml, optional bbctl-config.json (append ,Z on SELinux hosts)
+      - ./container-config:/config:ro
+      # SQLite + Zalo session on a named volume (bind mounts from Windows break SQLite WAL)
+      - zalo-data:/data
+    # Podman builds OCI images, which drop the Dockerfile HEALTHCHECK — declare it here
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(29350,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    # No ports published: the appservice only talks to bbctl proxy over loopback
+
+volumes:
+  zalo-data:

@@ -4,6 +4,7 @@
 import type { Bridge } from "matrix-appservice-bridge";
 import { tagPortalNetwork, type NetworkBranding } from "../matrix/network-branding.ts";
 import type { MappingStore, PortalRow } from "./mapping-store.ts";
+import { ownerIntent } from "./owner-intent.ts";
 import type { PuppetRegistry } from "./puppet-registry.ts";
 import type { ZaloThreadType } from "../zalo/types.ts";
 
@@ -35,6 +36,37 @@ export class PortalManager {
     this.puppets = puppets;
     this.ownerUserId = ownerUserId;
     this.branding = branding;
+  }
+
+  /**
+   * Startup repair: older syncs created portals from prefixed pinned ids ("u123" /
+   * "g123") that never match a real Zalo thread. Take the owner out of those empty
+   * rooms (so they vanish from Beeper) and drop their rows + bogus puppets.
+   */
+  async removeMalformedPortals(): Promise<number> {
+    let removed = 0;
+    for (const portal of this.store.getAllPortals()) {
+      if (/^\d+$/.test(portal.thread_id)) continue;
+      try {
+        // Not Intent.leave(): that goes through bot-sdk's own ensureRegistered → M_EXCLUSIVE
+        await ownerIntent(this.bridge, this.ownerUserId).matrixClient.leaveRoom(portal.room_id);
+      } catch (err) {
+        console.warn(`[bridge] owner leave ${portal.room_id} failed:`, (err as Error).message);
+      }
+      this.store.deletePortal(portal.thread_id);
+      removed++;
+    }
+    this.store.deleteMalformedPuppets();
+    if (removed) console.log(`[bridge] removed ${removed} malformed portal(s)`);
+    return removed;
+  }
+
+  /**
+   * Startup repair: join the owner into every known portal. Portals created while
+   * the owner auto-join was broken are stuck at "invite" and stay invisible in Beeper.
+   */
+  async joinOwnerToExistingPortals(): Promise<void> {
+    for (const portal of this.store.getAllPortals()) await this.ensureOwnerJoined(portal.room_id);
   }
 
   /** Re-emit the network state event on every existing portal (branding backfill). */
@@ -70,16 +102,16 @@ export class PortalManager {
    * Auto-accept the portal invite as the owner (hungryserv lets the as_token
    * double-puppet the owner). Without this, chats stay invisible until the user
    * manually accepts, and sending fails with "no permission" while un-joined.
-   * Falls back silently to manual accept when double-puppeting is unavailable.
+   * A failure is retried on the next message for that room.
    */
   private async ensureOwnerJoined(roomId: string): Promise<void> {
     if (this.ownerJoined.has(roomId)) return;
     try {
-      await this.bridge.getIntent(this.ownerUserId).join(roomId);
+      await ownerIntent(this.bridge, this.ownerUserId).join(roomId);
+      this.ownerJoined.add(roomId);
     } catch (err) {
       console.warn(`[bridge] owner auto-join ${roomId} failed (manual accept needed):`, (err as Error).message);
     }
-    this.ownerJoined.add(roomId); // one attempt per room per run either way
   }
 
   private async createPortal(ctx: PortalContext): Promise<PortalRow> {

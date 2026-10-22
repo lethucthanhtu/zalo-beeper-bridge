@@ -1,10 +1,11 @@
 // Facade over zca-js: the ONLY module allowed to import zca-js runtime classes.
 // Contains login lifecycle, listener resilience, normalization, and rate-limited sends.
 import { EventEmitter } from "node:events";
-import { Zalo, LoginQRCallbackEventType, ThreadType, type API } from "zca-js";
+import { GroupMessage, Zalo, LoginQRCallbackEventType, ThreadType, type API, type TGroupMessage } from "zca-js";
 import { emojiToZalo } from "./reaction-map.ts";
 import { loadCredentials, saveCredentials, clearCredentials } from "./credential-store.ts";
 import { normalizeZaloMessage } from "./event-normalizer.ts";
+import { installFrameTap } from "./frame-tap.ts";
 import { ListenerManager } from "./listener-manager.ts";
 import { RateLimiter } from "./rate-limiter.ts";
 import type { RawZaloMessage, ZaloMention, ZaloMessage, ZaloQuotePayload, ZaloReactionEvent, ZaloSeenEvent, ZaloThreadType, ZaloTypingEvent } from "./types.ts";
@@ -25,6 +26,20 @@ interface ZaloClientEvents {
   dead: [reason: string];
 }
 
+interface GroupRecentProps {
+  groupId: string;
+  count: number;
+  /** cloud cursor: 0 = newest, otherwise page back from this msgId */
+  globalMsgId: string;
+}
+
+interface GroupRecentPage {
+  msgs: GroupMessage[];
+  lastMsgId: string | null;
+  maxMsgId: string | null;
+  hasMore: boolean;
+}
+
 export type ListenerState = "stopped" | "connected" | "reconnecting" | "dead";
 
 export class ZaloClient extends EventEmitter<ZaloClientEvents> {
@@ -35,6 +50,10 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   private readonly opts: ZaloClientOptions;
   private listenerState: ListenerState = "stopped";
   private loginInFlight = false;
+  private historyCapture: { type: ThreadType; resolve: (batch: ZaloMessage[]) => void } | null = null;
+  // After a history request times out, its late reply is dropped instead of being
+  // emitted live (unsorted) or mistaken for the next request's page
+  private readonly discardLateHistoryUntil = new Map<ThreadType, number>();
 
   constructor(opts: ZaloClientOptions) {
     super();
@@ -132,17 +151,49 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   startListening(): void {
     if (!this.api) throw new Error("Not logged in");
     this.listenerState = "reconnecting"; // until first "connected"
+    // zca-js opens a fresh websocket per (re)connect — tap each one (E2EE DM reroute)
+    const listener = this.api.listener;
+    listener.on("connected", () => installFrameTap(listener));
+    // Zalo does not re-push messages missed while disconnected (restart, rebuild,
+    // network drop). Once the session key arrives, ask for this session's recent
+    // DM + group feed; the old_messages handler replays it through the normal
+    // pipeline and msgId dedup drops everything already bridged.
+    listener.on("cipher_key", () => {
+      setTimeout(() => {
+        if (this.api?.listener !== listener || this.historyCapture) return;
+        try {
+          listener.requestOldMessages(ThreadType.User, null);
+          listener.requestOldMessages(ThreadType.Group, null);
+        } catch (err) {
+          console.warn("catch-up request failed:", (err as Error).message);
+        }
+      }, 2_000);
+    });
     this.api.listener.on("message", (raw) => {
       const normalized = normalizeZaloMessage(raw as unknown as RawZaloMessage);
       if (normalized) this.emit("message", normalized);
     });
     // Zalo pushes recent messages per thread on connect — replay them through the
     // same pipeline (store-level msgId dedup makes this idempotent across restarts)
-    this.api.listener.on("old_messages", (messages) => {
-      for (const raw of messages as unknown as RawZaloMessage[]) {
-        const normalized = normalizeZaloMessage(raw);
-        if (normalized) this.emit("message", normalized);
+    this.api.listener.on("old_messages", (messages, type) => {
+      const normalizedBatch = (messages as unknown as RawZaloMessage[])
+        .map((raw) => normalizeZaloMessage(raw))
+        .filter((m): m is ZaloMessage => m !== null);
+      console.log(`[zalo] history batch type=${type === ThreadType.Group ? "group" : "user"} raw=${messages.length} usable=${normalizedBatch.length}`);
+      // A history page requested by sync is handed to its waiter (which replays it
+      // oldest-first) instead of being emitted out of order here
+      const capture = this.historyCapture;
+      if (capture && capture.type === type) {
+        this.historyCapture = null;
+        capture.resolve(normalizedBatch);
+        return;
       }
+      if ((this.discardLateHistoryUntil.get(type) ?? 0) > Date.now()) {
+        this.discardLateHistoryUntil.delete(type);
+        return;
+      }
+      // Catch-up replay: oldest-first so a gap is filled in order (store dedups by msgId)
+      for (const normalized of normalizedBatch.sort((a, b) => a.timestamp - b.timestamp)) this.emit("message", normalized);
     });
     this.api.listener.on("seen_messages", (seenList) => {
       for (const seen of seenList as Array<{ type: number; threadId: string; data: { msgId: string; seenUids?: Array<string | number> } }>) {
@@ -247,19 +298,104 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     }
   }
 
-  /** Recent group history, normalized and sorted oldest-first (best-effort backfill). */
+  /**
+   * Recent group history, normalized and sorted oldest-first (best-effort backfill).
+   * zca-js getGroupChatHistory hits /api/group/history, which Zalo removed (404,
+   * zca-js issues #356/#367); this calls the cloud-message endpoint Zalo Web uses
+   * now (zca-js PR #370), newest-first, max 50 per call. Cursor 0 can come back empty
+   * with only the cursor metadata, so the next call starts from maxMsgId, then pages
+   * back through lastMsgId while hasMore.
+   */
   async getGroupHistory(threadId: string, count = 30): Promise<ZaloMessage[]> {
-    if (!this.api) return [];
+    const api = this.api;
+    if (!api) return [];
+    const fetchPage = this.groupRecentApi(api);
+    const raw = new Map<string, GroupMessage>();
     try {
-      const res = await this.api.getGroupChatHistory(threadId, count);
-      return (res.groupMsgs ?? [])
-        .map((raw) => normalizeZaloMessage(raw as unknown as RawZaloMessage))
-        .filter((m): m is ZaloMessage => m !== null)
-        .sort((a, b) => a.timestamp - b.timestamp);
+      let cursor = "0";
+      for (let call = 0; call < 4 && raw.size < count; call++) {
+        const page = await fetchPage({ groupId: threadId, count: Math.min(count - raw.size, 50), globalMsgId: cursor });
+        for (const msg of page.msgs) raw.set(String(msg.data.msgId), msg);
+        const next = page.msgs.length === 0 && cursor === "0" ? page.maxMsgId : page.hasMore ? page.lastMsgId : null;
+        if (!next || next === "0" || next === cursor) break;
+        cursor = next;
+      }
     } catch (err) {
-      console.warn(`getGroupChatHistory(${threadId}) failed:`, (err as Error).message);
-      return [];
+      console.warn(`group history (${threadId}) failed:`, (err as Error).message);
     }
+    return [...raw.values()]
+      .map((msg) => normalizeZaloMessage(msg as unknown as RawZaloMessage))
+      .filter((m): m is ZaloMessage => m !== null)
+      .sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  /** Registers (once per logged-in API) the cloud group-history call via zca-js custom(). */
+  private groupRecentApi(api: API): (props: GroupRecentProps) => Promise<GroupRecentPage> {
+    const name = "bridgeGroupRecent";
+    const existing = (api as unknown as Record<string, unknown>)[name];
+    if (typeof existing === "function") return existing as (props: GroupRecentProps) => Promise<GroupRecentPage>;
+    api.custom<GroupRecentPage, GroupRecentProps>(name, async ({ ctx, utils, props }) => {
+      // The service map lives on the API object (zca-js apis.d.ts), not on ctx
+      const serviceURL = utils.makeURL(`${api.zpwServiceMap.group_cloud_message[0]}/api/cm/getrecentv2`);
+      const params = { groupId: props.groupId, globalMsgId: Number(props.globalMsgId), count: props.count, msgIds: [], imei: ctx.imei, src: 3 };
+      const encrypted = utils.encodeAES(JSON.stringify(params));
+      if (!encrypted) throw new Error("Failed to encrypt params");
+      const response = await utils.request(utils.makeURL(serviceURL, { params: encrypted, nretry: 0 }), { method: "GET" });
+      return utils.resolve(response, (result) => {
+        const data = (typeof result.data === "string" ? JSON.parse(result.data) : result.data) as {
+          groupMsgs?: TGroupMessage[];
+          lastMsgId?: string | number;
+          maxMsgId?: string | number;
+          hasMore?: number | boolean;
+        };
+        if (process.env.ZALO_WS_TRACE === "1") {
+          const d = data as Record<string, unknown>;
+          const meta = ["error", "lastMsgId", "minMsgId", "maxMsgId", "hasMore", "isOld", "isFiltered", "tsJoinGroup", "isFilteredByPhase", "isFilteredByTimeJoin"]
+            .map((k) => `${k}=${String(d[k])}`)
+            .join(" ");
+          console.log(`[zalo:http] getrecentv2 ${props.groupId} cursor=${props.globalMsgId} msgs=${data.groupMsgs?.length ?? 0} ${meta}`);
+        }
+        return {
+          msgs: (data.groupMsgs ?? []).map((raw) => new GroupMessage(ctx.uid, raw)),
+          lastMsgId: data.lastMsgId != null ? String(data.lastMsgId) : null,
+          maxMsgId: data.maxMsgId != null ? String(data.maxMsgId) : null,
+          hasMore: Boolean(data.hasMore),
+        };
+      });
+    });
+    return (api as unknown as Record<string, (props: GroupRecentProps) => Promise<GroupRecentPage>>)[name]!;
+  }
+
+  /**
+   * One page of recent messages across ALL threads of a type (what Zalo Web loads to
+   * build its conversation list — the only way to discover DM threads). Pass the
+   * oldest msgId of the previous page to go further back. null = no answer (timeout,
+   * not listening); [] = no more history.
+   */
+  async fetchRecentMessagesPage(threadType: ZaloThreadType, beforeMsgId: string | null, timeoutMs = 15_000): Promise<ZaloMessage[] | null> {
+    const api = this.api;
+    if (!api || this.listenerState !== "connected" || this.historyCapture) return null;
+    const type = threadType === "group" ? ThreadType.Group : ThreadType.User;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (this.historyCapture?.resolve === done) this.historyCapture = null;
+        this.discardLateHistoryUntil.set(type, Date.now() + 60_000);
+        resolve(null);
+      }, timeoutMs);
+      const done = (batch: ZaloMessage[]) => {
+        clearTimeout(timer);
+        resolve(batch);
+      };
+      this.historyCapture = { type, resolve: done };
+      try {
+        api.listener.requestOldMessages(type, beforeMsgId);
+      } catch (err) {
+        console.warn("requestOldMessages failed:", (err as Error).message);
+        this.historyCapture = null;
+        clearTimeout(timer);
+        resolve(null);
+      }
+    });
   }
 
   /** Group display name via zca-js getGroupInfo; null when unavailable. */

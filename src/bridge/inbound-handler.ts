@@ -7,6 +7,7 @@ import { bridgeInboundPhoto, bridgeInboundSticker } from "./media-handler.ts";
 import { buildInboundMentions } from "./mentions.ts";
 import { SELF_BRIDGE_MARKER } from "./outbound-handler.ts";
 import type { MappingStore } from "./mapping-store.ts";
+import { ownerIntent } from "./owner-intent.ts";
 import type { PortalManager } from "./portal-manager.ts";
 import type { PuppetRegistry } from "./puppet-registry.ts";
 import type { ZaloMessage } from "../zalo/types.ts";
@@ -189,12 +190,6 @@ export class InboundHandler {
    * intent and let the first real send confirm/deny capability.
    */
   private intentForSelf() {
-    const intent = this.deps.bridge.getIntent(this.deps.ownerUserId);
-    // Owner is a real account outside the @sh-zalo_* namespace: registering it
-    // returns M_EXCLUSIVE (not swallowed for non-bot users) and disables the whole
-    // path. Mark it pre-registered so ensureRegistered no-ops; the as_token can
-    // still impersonate the owner to send (hungryserv single-tenant).
-    (intent as unknown as { opts: { registered: boolean } }).opts.registered = true;
-    return intent;
+    return ownerIntent(this.deps.bridge, this.deps.ownerUserId);
   }
 }

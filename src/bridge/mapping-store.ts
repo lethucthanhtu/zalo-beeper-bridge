@@ -123,6 +123,26 @@ export class MappingStore {
     return row?.event_id ?? null;
   }
 
+  /** True when at least one Zalo message was bridged into this room. */
+  roomHasMessages(roomId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM message WHERE room_id = ? LIMIT 1").get(roomId) !== undefined;
+  }
+
+  /** Drops a portal and its message mappings (used to discard malformed portals). */
+  deletePortal(threadId: string): void {
+    const portal = this.getPortalByThread(threadId);
+    if (!portal) return;
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM message WHERE room_id = ?").run(portal.room_id);
+      this.db.prepare("DELETE FROM portal WHERE thread_id = ?").run(threadId);
+    })();
+  }
+
+  /** Removes puppets whose Zalo uid is not purely numeric (created from prefixed ids). */
+  deleteMalformedPuppets(): number {
+    return this.db.prepare("DELETE FROM puppet WHERE zalo_uid GLOB '*[^0-9]*'").run().changes;
+  }
+
   insertPortal(row: PortalRow): void {
     this.db
       .prepare("INSERT INTO portal (thread_id, thread_type, room_id, name, created_at) VALUES (?, ?, ?, ?, ?)")

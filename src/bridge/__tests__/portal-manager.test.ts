@@ -20,10 +20,12 @@ function mockBridge() {
     setDisplayName: vi.fn(async () => undefined),
     setAvatarUrl: vi.fn(async () => undefined),
     join: vi.fn(async () => undefined),
+    matrixClient: { leaveRoom: vi.fn(async () => undefined) },
     invite: vi.fn(async () => undefined),
     uploadContent: vi.fn(async () => "mxc://logo"),
     sendStateEvent: vi.fn(async () => ({ event_id: "$s" })),
     userId: "@sh-zalobot:beeper.local",
+    opts: { registered: false },
   };
   const bridge = {
     getIntent: vi.fn(() => intent),
@@ -113,5 +115,40 @@ describe("PortalManager", () => {
     await portals.ensureGhostInRoom("u5", "!g:x");
     expect(intent.invite).toHaveBeenCalledWith("!g:x", "@sh-zalo_u5:beeper.local");
     expect(intent.join).toHaveBeenCalledTimes(2);
+  });
+
+  it("joins the owner as a pre-registered intent (ensureRegistered would hit M_EXCLUSIVE)", async () => {
+    const { bridge, intent } = mockBridge();
+    const portals = new PortalManager(bridge, store, new PuppetRegistry(bridge, store, "beeper.local"), OWNER, { name: "Zalo", logoPath: "assets/zalo-logo.png", networkId: "zalo", stateKey: "beeper.local/sh-zalo" });
+    const portal = await portals.getOrCreatePortal({ threadId: "g9", threadType: "group", senderId: "" });
+    expect(bridge.getIntent).toHaveBeenCalledWith(OWNER);
+    expect(intent.opts.registered).toBe(true);
+    expect(intent.join).toHaveBeenCalledWith(portal.room_id);
+  });
+
+  it("retries a failed owner join and repairs existing portals at startup", async () => {
+    const { bridge, intent } = mockBridge();
+    const portals = new PortalManager(bridge, store, new PuppetRegistry(bridge, store, "beeper.local"), OWNER, { name: "Zalo", logoPath: "assets/zalo-logo.png", networkId: "zalo", stateKey: "beeper.local/sh-zalo" });
+    intent.join.mockRejectedValueOnce(new Error("M_EXCLUSIVE"));
+    const portal = await portals.getOrCreatePortal({ threadId: "g8", threadType: "group", senderId: "" });
+    intent.join.mockClear();
+    await portals.joinOwnerToExistingPortals();
+    expect(intent.join).toHaveBeenCalledWith(portal.room_id);
+    intent.join.mockClear();
+    await portals.joinOwnerToExistingPortals(); // already joined this run → no extra request
+    expect(intent.join).not.toHaveBeenCalled();
+  });
+
+  it("removes portals built from prefixed pinned ids and their bogus puppets", async () => {
+    const { bridge, intent } = mockBridge();
+    const portals = new PortalManager(bridge, store, new PuppetRegistry(bridge, store, "beeper.local"), OWNER, { name: "Zalo", logoPath: "assets/zalo-logo.png", networkId: "zalo", stateKey: "beeper.local/sh-zalo" });
+    store.insertPortal({ thread_id: "u123", thread_type: "user", room_id: "!bad:beeper.local", name: null });
+    store.insertPortal({ thread_id: "456", thread_type: "group", room_id: "!good:beeper.local", name: "G" });
+    store.upsertPuppet("u123", "@sh-zalo_u123:beeper.local", null);
+    store.upsertPuppet("123", "@sh-zalo_123:beeper.local", null);
+    expect(await portals.removeMalformedPortals()).toBe(1);
+    expect(intent.matrixClient.leaveRoom).toHaveBeenCalledWith("!bad:beeper.local");
+    expect(store.getAllPortals().map((p) => p.thread_id)).toEqual(["456"]);
+    expect(store.getPuppetDisplayName("u123")).toBeNull();
   });
 });

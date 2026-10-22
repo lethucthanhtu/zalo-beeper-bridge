@@ -19,3 +19,7 @@ registration.yaml
 .claude/settings.local.json
 logs/
 plans/
+
+# container deployment inputs (secrets)
+container-config/
+data/
