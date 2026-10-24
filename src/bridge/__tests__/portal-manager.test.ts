@@ -221,4 +221,36 @@ describe('PortalManager', () => {
     await portals.repairDmGhostNames(); // named now → no further lookups
     expect(resolveProfile).not.toHaveBeenCalled();
   });
+
+  it('repairs missing names and avatars in batches, DM contacts first, and remembers empty profiles', async () => {
+    const { bridge, intent } = mockBridge();
+    const puppets = new PuppetRegistry(bridge, store, 'beeper.local');
+    store.insertPortal({ thread_id: '900', thread_type: 'user', room_id: '!dm:beeper.local', name: null });
+    store.upsertPuppet('100', '@sh-zalo_100:beeper.local', null); // group member, unnamed
+    store.upsertPuppet('900', '@sh-zalo_900:beeper.local', 'Bob'); // DM peer without avatar
+    store.upsertPuppet('555', '@sh-zalo_555:beeper.local', null); // deleted account
+    expect(store.getPuppetsMissingProfile(60_000)[0]).toBe('900'); // DM peer first
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(
+        async () => new Response(Buffer.from([0xff, 0xd8, 0xff]), { headers: { 'content-type': 'image/jpeg' } }),
+      );
+    const fetchProfiles = vi.fn(async (uids: string[]) => {
+      const profiles = new Map<string, { displayName?: string; avatarUrl?: string }>();
+      if (uids.includes('100')) profiles.set('100', { displayName: 'Carol' }); // no avatar
+      if (uids.includes('900'))
+        profiles.set('900', { displayName: 'Bobby', avatarUrl: 'https://s120-ava-talk.zadn.vn/b.jpg' });
+      return profiles;
+    });
+    const result = await puppets.repairMissingProfiles(fetchProfiles, { batchSize: 2, pauseMs: 0 });
+    fetchMock.mockRestore();
+    expect(fetchProfiles).toHaveBeenCalledTimes(2); // 3 contacts in batches of 2
+    expect(result).toEqual({ named: 1, withAvatar: 1, checked: 2, complete: true });
+    expect(store.getPuppetDisplayName('100')).toBe('Carol');
+    expect(store.getPuppetDisplayName('900')).toBe('Bob'); // an existing name is kept
+    expect(store.getPuppetAvatarUrl('900')).toBe('https://s120-ava-talk.zadn.vn/b.jpg');
+    expect(intent.setAvatarUrl).toHaveBeenCalledTimes(1);
+    // everyone was checked, so nothing is pending until the recheck window passes
+    expect(store.getPuppetsMissingProfile(60_000)).toEqual([]);
+  });
 });

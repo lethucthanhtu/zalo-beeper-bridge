@@ -35,6 +35,17 @@ export class EchoSuppressor {
   }
 
   /**
+   * Removes the most recently armed image marker — call when an image send FAILED, so a
+   * real photo sent from the phone within the TTL isn't wrongly swallowed as our echo.
+   */
+  cancelImage(threadId: string): void {
+    const expiries = this.pendingImages.get(threadId);
+    if (!expiries) return;
+    expiries.pop();
+    if (!expiries.length) this.pendingImages.delete(threadId);
+  }
+
+  /**
    * True (consuming the first live marker) when a self photo in this thread is our own echo.
    * Deletes the thread's entry when no live marker is found or none is left after consuming.
    */

@@ -82,7 +82,7 @@ function feed(chunk) {
       const isFile = header.type === '0';
       if (isFile && flag === '--list') console.log(`${header.size}\t${header.name}`);
       if (isFile && outDir && flag !== '--list' && (flag === '--all' || header.name.includes('/database/'))) {
-        const destination = path.join(outDir, header.name.replace(/[:?<>|]/g, '_'));
+        const destination = safeDestination(outDir, header.name);
         fs.mkdirSync(path.dirname(destination), { recursive: true });
         currentEntry.out = fs.openSync(destination, 'w');
         extractedCount++;
@@ -106,17 +106,48 @@ function feed(chunk) {
   }
 }
 
+/**
+ * Where a tar entry may be written: inside `baseDir` only. Entry names come from the
+ * (untrusted) backup, so absolute paths, drive letters and `..` segments are refused
+ * instead of letting a crafted archive write anywhere on disk (path traversal).
+ * Characters Windows forbids in file names are replaced with `_`.
+ *
+ * @throws Error when the entry name would escape `baseDir`
+ */
+function safeDestination(baseDir, entryName) {
+  const cleaned = entryName.replace(/\\/g, '/').replace(/[:?<>|*"]/g, '_');
+  const segments = cleaned.split('/').filter((segment) => segment && segment !== '.');
+  if (cleaned.startsWith('/') || segments.includes('..')) throw new Error(`unsafe path in backup: ${entryName}`);
+  const root = path.resolve(baseDir);
+  const destination = path.resolve(root, ...segments);
+  if (destination !== root && !destination.startsWith(root + path.sep)) {
+    throw new Error(`unsafe path in backup: ${entryName}`);
+  }
+  return destination;
+}
+
+/** Prints the error and aborts with exit code 1 (wrong key, corrupt archive, unreadable file). */
+function fail(err) {
+  console.error(err.message);
+  process.exit(1);
+}
+
 // Read 1 MiB at a time, decrypt, and feed the tar parser; any parse error aborts with exit code 1
 const backupStream = fs.createReadStream(backupFile, { highWaterMark: 1 << 20 });
+backupStream.on('error', fail);
 backupStream.on('data', (encryptedChunk) => {
   try {
     feed(decipher.update(encryptedChunk));
   } catch (err) {
-    console.error(err.message);
-    process.exit(1);
+    fail(err);
   }
 });
 backupStream.on('end', () => {
-  feed(decipher.final());
+  try {
+    // A wrong key usually only surfaces here, as a bad-padding error on the last block
+    feed(decipher.final());
+  } catch (err) {
+    fail(new Error(`decryption failed — wrong UIN (key) or a truncated backup: ${err.message}`));
+  }
   if (flag !== '--list') console.log(`extracted ${extractedCount} file(s) into ${outDir}`);
 });

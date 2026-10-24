@@ -66,14 +66,17 @@ export type ZaloStatePublisherDeps = {
  *
  * @param deps - Homeserver/bridge identity plus Zalo profile and avatar-upload callbacks.
  * @returns `publish(stateEvent)`: resolves once the state is posted; a no-op while logged out
- *   (no own uid). Never rejects for HTTP/network failures of the POST or the avatar upload
- *   (they are logged); a rejecting `getOwnProfile` does propagate.
+ *   (no own uid), and a publish overtaken by a later one while it was still looking up the
+ *   profile is dropped (so a slow CONNECTED cannot overwrite a newer disconnect state).
+ *   Never rejects: profile lookup, avatar upload and POST failures are logged or ignored.
  */
 export function createZaloStatePublisher(
   deps: ZaloStatePublisherDeps,
 ): (stateEvent: RemoteStateEvent) => Promise<void> {
   const reportRemoteState = createRemoteStateReporter(deps.homeserverUrl, deps.bridgeId, deps.asToken);
   let lastState: RemoteState | null = null;
+  /** Bumped by every publish; a publish only takes effect while it is still the latest. */
+  let latestPublish = 0;
 
   setInterval(() => {
     if (lastState) void reportRemoteState(lastState);
@@ -82,9 +85,12 @@ export function createZaloStatePublisher(
   return async (stateEvent) => {
     const remoteId = deps.getOwnId();
     if (!remoteId) return; // logged out — nothing to file the state under
+    const publishNumber = ++latestPublish;
 
-    const profile = stateEvent === 'CONNECTED' ? await withTimeout(deps.getOwnProfile(remoteId)) : null;
+    const profile =
+      stateEvent === 'CONNECTED' ? await withTimeout(deps.getOwnProfile(remoteId)).catch(() => null) : null;
     const avatarMxc = profile?.avatarUrl ? await deps.uploadAvatar(profile.avatarUrl).catch(warnAvatar) : undefined;
+    if (publishNumber !== latestPublish) return; // a newer state was published meanwhile
 
     lastState = {
       state_event: stateEvent,

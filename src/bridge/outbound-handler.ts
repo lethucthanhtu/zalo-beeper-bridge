@@ -5,6 +5,7 @@
 //   2. selfListen re-delivery of what we just sent — registered with EchoSuppressor
 import { imageSize } from 'image-size';
 import type { Bridge, WeakEvent } from 'matrix-appservice-bridge';
+import { isAdts } from './audio-remux.ts';
 import type { EchoSuppressor } from './echo-suppressor.ts';
 import { downloadMatrixMedia } from './media-handler.ts';
 import { mentionsFromUserIds, parseOutboundMentions } from './mentions.ts';
@@ -35,9 +36,25 @@ const MIME_EXT: Record<string, string> = {
   'audio/ogg': 'ogg',
   'audio/mpeg': 'mp3',
   'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/m4a': 'm4a',
   'audio/aac': 'aac',
   'application/pdf': 'pdf',
 };
+
+/**
+ * Filename for sending a Matrix voice note as a Zalo voice message, or null when the
+ * audio is not AAC (Zalo voice is AAC only — e.g. ogg/opus then goes out as a file).
+ * AAC is recognised by mimetype (audio/mp4, x-m4a, m4a, aac) or by the bytes: an MP4
+ * container (`ftyp`) → `.m4a`, a raw ADTS stream → `.aac`.
+ */
+export function aacVoiceFilename(mimetype: string, bytes: Buffer): `${string}.${string}` | null {
+  const type = mimetype.split(';')[0]!.trim().toLowerCase();
+  if (isAdts(bytes) || type === 'audio/aac' || type === 'audio/aacp') return 'voice.aac';
+  const isMp4Container = bytes.subarray(4, 8).toString('latin1') === 'ftyp';
+  if (isMp4Container || ['audio/mp4', 'audio/x-m4a', 'audio/m4a'].includes(type)) return 'voice.m4a';
+  return null;
+}
 
 /**
  * Build a `name.ext` filename — zca-js routes attachments by extension.
@@ -195,6 +212,20 @@ export class OutboundHandler {
       mentions = parseOutboundMentions(body, formattedBody, uidFromMxid);
     }
 
+    // Echo guards armed for this send that have not been matched yet. A failed attempt
+    // must disarm exactly the guards it armed: a send can fail before onBeforeSend runs
+    // (nothing to cancel — cancelling would disarm another send's guard) or after it
+    // (a live guard would swallow a real phone-typed message with the same text).
+    let armedGuards = 0;
+    /** onBeforeSend hook: arms one text echo guard at real send time and counts it. */
+    const armGuard = () => {
+      this.deps.echo.expect(portal.thread_id, body);
+      armedGuards++;
+    };
+    /** Disarms every guard this send armed (after a failed attempt). */
+    const disarmGuards = () => {
+      for (; armedGuards > 0; armedGuards--) this.deps.echo.cancel(portal.thread_id, body);
+    };
     try {
       // expect() runs via onBeforeSend AFTER the rate-limit wait — the suppression
       // TTL must start at real send time or bursts outlive it (duplicate echoes)
@@ -205,19 +236,20 @@ export class OutboundHandler {
           portal.thread_type,
           body,
           quote,
-          () => this.deps.echo.expect(portal.thread_id, body),
+          armGuard,
           mentions,
         );
       } catch (quoteErr) {
         if (!quote) throw quoteErr;
         // A stale/incompatible quote payload can be rejected — degrade to a plain send
         console.warn('[outbound] quoted send failed, retrying without quote:', (quoteErr as Error).message);
+        disarmGuards();
         sendResult = await this.deps.zalo.sendText(
           portal.thread_id,
           portal.thread_type,
           body,
           undefined,
-          () => this.deps.echo.expect(portal.thread_id, body),
+          armGuard,
           mentions,
         );
       }
@@ -225,7 +257,7 @@ export class OutboundHandler {
         this.deps.store.recordMessage(sendResult.msgId, event.room_id, event.event_id ?? null, 'outbound');
       else if (event.event_id) this.deps.store.markOutboundHandled(event.event_id, event.room_id);
     } catch (err) {
-      this.deps.echo.cancel(portal.thread_id, body);
+      disarmGuards();
       await this.notice(event.room_id, `⚠ Failed to deliver to Zalo: ${(err as Error).message}`);
     }
     return true;
@@ -247,10 +279,14 @@ export class OutboundHandler {
     portal: PortalRow,
     msgtype: string,
     mxcUrl: string,
-    content: { body?: string; filename?: string; info?: { mimetype?: string } },
+    content: { body?: string; filename?: string; info?: { mimetype?: string }; 'org.matrix.msc3245.voice'?: unknown },
   ): Promise<void> {
     if (event.sender !== this.deps.ownerUserId) return;
     if (event.event_id && this.deps.store.hasEventId(event.event_id)) return;
+    // Guards armed for this send — disarmed again when the send fails, so a real
+    // photo / caption sent from the phone within the TTL is not swallowed as an echo
+    let imageGuardArmed = false;
+    let captionGuard = '';
     try {
       // Authenticated-media download via fetch (bot-sdk's downloadContent 400s on Beeper's R2 redirect)
       const { buffer: mediaBytes, mimetype: downloadedMimetype } = await downloadMatrixMedia(
@@ -260,14 +296,25 @@ export class OutboundHandler {
         this.deps.mediaMaxBytes,
       );
       const mimetype = content.info?.mimetype ?? downloadedMimetype;
+      // A Matrix voice note (MSC3245 marker) in AAC goes out as a native Zalo voice
+      // message; other codecs (e.g. ogg/opus) can't be voice on Zalo and stay files
+      const voiceFilename =
+        msgtype === 'm.audio' && content['org.matrix.msc3245.voice'] !== undefined
+          ? aacVoiceFilename(mimetype, mediaBytes)
+          : null;
       // MSC2530 caption: when body differs from the filename, body is the caption.
       // Attach it to the media message so Zalo shows one captioned message, not two.
-      const caption = content.body && content.body !== content.filename ? content.body : '';
+      // Voice messages carry no caption (clients put "Voice message" in the body).
+      const caption = !voiceFilename && content.body && content.body !== content.filename ? content.body : '';
       const filename = buildFilename(msgtype, content.filename, mimetype);
       // Arm the pre-send guard before the network call: the selfListen echo can
       // arrive before the send resolves and we record its msgId
       this.deps.echo.expectImage(portal.thread_id);
-      if (caption) this.deps.echo.expect(portal.thread_id, caption); // caption echoes as a text selfListen event
+      imageGuardArmed = true;
+      if (caption) {
+        this.deps.echo.expect(portal.thread_id, caption); // caption echoes as a text selfListen event
+        captionGuard = caption;
+      }
       let msgIds: string[];
       if (msgtype === 'm.image') {
         let width = 0;
@@ -288,8 +335,10 @@ export class OutboundHandler {
           height,
           caption,
         );
+      } else if (voiceFilename) {
+        msgIds = await this.deps.zalo.sendVoice(portal.thread_id, portal.thread_type, mediaBytes, voiceFilename);
       } else {
-        // video (.mp4) / file / audio — zca-js routes by extension
+        // video (.mp4) / file / non-voice audio — zca-js routes by extension
         msgIds = await this.deps.zalo.sendFile(portal.thread_id, portal.thread_type, mediaBytes, filename, caption);
       }
       // Record msgIds for echo dedup; first carries the Matrix event_id so redacting recalls it on Zalo
@@ -298,6 +347,8 @@ export class OutboundHandler {
       );
       if (msgIds.length === 0 && event.event_id) this.deps.store.markOutboundHandled(event.event_id, portal.room_id);
     } catch (err) {
+      if (imageGuardArmed) this.deps.echo.cancelImage(portal.thread_id);
+      if (captionGuard) this.deps.echo.cancel(portal.thread_id, captionGuard);
       await this.notice(
         event.room_id!,
         `⚠ Failed to send ${msgtype.replace('m.', '')} to Zalo: ${(err as Error).message}`,

@@ -15,7 +15,7 @@ export type PortalRow = {
 export type MessageDirection = 'inbound' | 'outbound';
 
 /** Target `PRAGMA user_version`; bump it together with a new step in `migrate()`. */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 /**
  * Synchronous SQLite-backed store for everything the bridge must remember across
@@ -58,6 +58,9 @@ export class MappingStore {
         this.db.exec('ALTER TABLE message ADD COLUMN sender_id TEXT');
         this.db.exec('ALTER TABLE message ADD COLUMN msg_type TEXT');
       }
+      // when the contact's Zalo profile was last looked up — so a contact without an
+      // avatar is not looked up again on every event (avatar_url stays null for them)
+      if (current < 6) this.db.exec('ALTER TABLE puppet ADD COLUMN profile_checked_at INTEGER');
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     })();
   }
@@ -113,6 +116,35 @@ export class MappingStore {
     this.db
       .prepare('UPDATE puppet SET avatar_url = ?, updated_at = ? WHERE zalo_uid = ?')
       .run(avatarUrl, Date.now(), zaloUid);
+  }
+
+  /** Records that the contact's Zalo profile was just looked up (with or without an avatar). */
+  markProfileChecked(zaloUid: string): void {
+    this.db.prepare('UPDATE puppet SET profile_checked_at = ? WHERE zalo_uid = ?').run(Date.now(), zaloUid);
+  }
+
+  /** True when the contact's profile was looked up within the last `maxAgeMs`. */
+  isProfileFresh(zaloUid: string, maxAgeMs: number): boolean {
+    const row = this.db.prepare('SELECT profile_checked_at FROM puppet WHERE zalo_uid = ?').get(zaloUid) as
+      { profile_checked_at: number | null } | undefined;
+    return row?.profile_checked_at != null && Date.now() - row.profile_checked_at < maxAgeMs;
+  }
+
+  /**
+   * Contacts still missing an avatar or a name whose profile was not looked up within
+   * `maxAgeMs` — DM peers first (their avatar is the chat's picture in Beeper).
+   */
+  getPuppetsMissingProfile(maxAgeMs: number): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT puppet.zalo_uid AS uid FROM puppet
+         LEFT JOIN portal ON portal.thread_id = puppet.zalo_uid AND portal.thread_type = 'user'
+         WHERE (puppet.avatar_url IS NULL OR puppet.display_name IS NULL)
+           AND (puppet.profile_checked_at IS NULL OR puppet.profile_checked_at < ?)
+         ORDER BY portal.thread_id IS NULL, puppet.zalo_uid`,
+      )
+      .all(Date.now() - maxAgeMs) as Array<{ uid: string }>;
+    return rows.map((row) => row.uid);
   }
 
   /** Portal of a Zalo thread, or undefined when the thread has no room yet. */

@@ -77,6 +77,11 @@ export class InboundHandler {
     // payload + cliMsgId the send response lacked, so replying to / recalling our own
     // message works. Then drop it (already visible in Beeper).
     if (msg.isSelf && this.deps.store.hasMessage(msg.msgId)) {
+      // The send response won the race against this echo, so the guard armed for it was
+      // never matched: consume it now, or it would swallow a real phone message (same
+      // text, or any media in this thread) for the rest of its TTL
+      if (msg.content.kind === 'text') this.deps.echo.consume(msg.threadId, msg.content.text);
+      else if (msg.content.kind === 'photo' || msg.content.kind === 'media') this.deps.echo.consumeImage(msg.threadId);
       this.deps.store.recordMessage(
         msg.msgId,
         this.deps.store.getPortalByThread(msg.threadId)?.room_id ?? '',
@@ -92,7 +97,13 @@ export class InboundHandler {
     // Our own send echoed back by selfListen → already visible in Beeper, don't repost
     const isTextEcho =
       msg.isSelf && msg.content.kind === 'text' && this.deps.echo.consume(msg.threadId, msg.content.text);
-    const isMediaEcho = msg.isSelf && msg.content.kind === 'photo' && this.deps.echo.consumeImage(msg.threadId);
+    // Every outbound media send (photo, video, file, voice) arms one media marker, so
+    // the echo of any of them consumes it — not only photos (a leftover marker would
+    // otherwise swallow a real phone photo, and the echo itself would be re-posted)
+    const isMediaEcho =
+      msg.isSelf &&
+      (msg.content.kind === 'photo' || msg.content.kind === 'media') &&
+      this.deps.echo.consumeImage(msg.threadId);
     if (isTextEcho || isMediaEcho) {
       // The echo carries the cliMsgId our send response lacked (needed for recall)
       // and a full quotable payload (needed to reply to our own Beeper-sent message)
@@ -155,6 +166,15 @@ export class InboundHandler {
           ];
         }
         const sent = await intent.sendMessage(portal.room_id, textContent);
+        eventId = sent.event_id;
+        break;
+      }
+      case 'notice': {
+        const sent = await intent.sendMessage(portal.room_id, {
+          msgtype: 'm.notice',
+          body: msg.content.text,
+          ...extraContent,
+        });
         eventId = sent.event_id;
         break;
       }

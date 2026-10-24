@@ -1,6 +1,7 @@
 // Raw zca-js message → ZaloMessage. All zca-js payload quirks live here.
-import type { MediaDescriptor } from '../bridge/media-content.ts';
+import { toMatrixWaveform, type MediaDescriptor } from '../bridge/media-content.ts';
 import type { RawZaloMessage, ZaloContent, ZaloMessage } from './types.ts';
+import { CALL_ACTIONS, describeCall } from './call-message.ts';
 
 /** chat.photo content shape observed in fixtures */
 type PhotoContent = {
@@ -57,6 +58,11 @@ function normalizeContent(msgType: string, content: unknown): ZaloContent {
     }
   }
   if (typeof content === 'object' && content !== null) {
+    // Call log bubbles are link cards without an href — render them as a call line
+    const card = content as AttachmentContent & { action?: string };
+    if (card.action && CALL_ACTIONS.has(card.action)) {
+      return { kind: 'notice', text: describeCall(card.action, card.params) };
+    }
     const media = normalizeMedia(msgType, content as AttachmentContent);
     if (media) return { kind: 'media', media };
   }
@@ -145,14 +151,17 @@ function normalizeMedia(msgType: string, attachment: AttachmentContent): MediaDe
         filename: attachment.title || 'zalo-file',
         size: positive(params.fileSize),
       };
-    case 'chat.voice':
+    case 'chat.voice': {
+      const waveform = toMatrixWaveform(params.waveformSamples);
       return {
         kind: 'audio',
         urls: [attachment.href],
-        filename: 'zalo-voice.m4a',
+        filename: 'Voice message.m4a',
         durationMs: positive(params.duration),
         size: positive(params.fileSize),
+        ...(waveform ? { waveform } : {}),
       };
+    }
     case 'chat.gif':
       return {
         kind: 'image',

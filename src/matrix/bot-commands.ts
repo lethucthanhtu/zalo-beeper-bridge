@@ -127,8 +127,13 @@ export async function handleBotEvent(context: BotCommandContext, event: WeakEven
       await context.bridge
         .getIntent()
         .sendText(event.room_id, 'Syncing pinned conversations + top groups (paced to protect the account)...');
-      const summary = await context.runSync();
-      await context.bridge.getIntent().sendText(event.room_id, summary);
+      try {
+        const summary = await context.runSync();
+        await context.bridge.getIntent().sendText(event.room_id, summary);
+      } catch (err) {
+        // the owner asked for it — tell them, don't just log
+        await context.bridge.getIntent().sendText(event.room_id, `Sync failed: ${(err as Error).message}`);
+      }
       return true;
     }
     default:

@@ -40,4 +40,16 @@ describe('EchoSuppressor', () => {
     expect(echo.consume('t1', 'ok')).toBe(true);
     expect(echo.consume('t1', 'ok')).toBe(false);
   });
+
+  it('disarms a failed media send so a real phone photo is not swallowed', () => {
+    const echo = new EchoSuppressor();
+    echo.expectImage('t1');
+    echo.cancelImage('t1'); // the send failed
+    expect(echo.consumeImage('t1')).toBe(false);
+    echo.expectImage('t1');
+    echo.expectImage('t1');
+    echo.cancelImage('t1'); // one of two sends failed
+    expect(echo.consumeImage('t1')).toBe(true);
+    expect(echo.consumeImage('t1')).toBe(false);
+  });
 });

@@ -18,10 +18,12 @@ export class RateLimiter {
    *
    * @param perMinute sustained rate (tokens refilled per minute)
    * @param burst bucket capacity; defaults to `perMinute` (at least 1)
-   * @throws when perMinute is not positive
+   * @throws when perMinute is not positive or burst is below 1 (a bucket that can never
+   *   hold a whole token would delay every call by a full refill instead of pacing)
    */
   constructor(perMinute: number, burst?: number) {
     if (perMinute <= 0) throw new Error('perMinute must be > 0');
+    if (burst !== undefined && !(burst >= 1)) throw new Error('burst must be >= 1');
     this.capacity = burst ?? Math.max(perMinute, 1);
     this.refillPerMs = perMinute / 60_000;
     this.tokens = this.capacity;

@@ -26,3 +26,6 @@ data/
 
 # graphify knowledge graph (rebuild with: graphify update .)
 graphify-out/
+
+# archify diagram output
+.archify/

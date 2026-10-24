@@ -51,6 +51,32 @@ type GroupRecentPage = {
 
 export type ListenerState = 'stopped' | 'connected' | 'reconnecting' | 'dead';
 
+/** Upper bound for one attachment upload/send to Zalo before the bridge gives up. */
+const MEDIA_SEND_TIMEOUT_MS = 60_000;
+
+/**
+ * Rejects when `promise` has not settled within MEDIA_SEND_TIMEOUT_MS. zca-js attachment
+ * uploads wait for a websocket "file_done" ack and never reject when it doesn't come
+ * (e.g. the listener is down), which would leave the send — and the Beeper user — waiting
+ * forever. The underlying request is not cancelled, only no longer awaited.
+ *
+ * @throws Error naming the step that timed out
+ */
+async function withSendTimeout<T>(promise: Promise<T>, step: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${step} timed out after ${MEDIA_SEND_TIMEOUT_MS / 1000}s`)),
+      MEDIA_SEND_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * The bridge's single entry point to Zalo. Owns the zca-js API session (cookie / QR
  * login), the resilient websocket listener, normalization of inbound events into
@@ -64,6 +90,8 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   private readonly startedAt = Date.now();
   private readonly opts: ZaloClientOptions;
   private listenerState: ListenerState = 'stopped';
+  /** zca-js listeners whose handlers are already attached (see startListening) */
+  private readonly wiredListeners = new WeakSet<object>();
   private loginInFlight = false;
   private historyCapture: { type: ThreadType; resolve: (batch: ZaloMessage[]) => void } | null = null;
   // After a history request times out, its late reply is dropped instead of being
@@ -207,9 +235,17 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
    */
   startListening(): void {
     if (!this.api) throw new Error('Not logged in');
+    const listener = this.api.listener;
+    // Handlers are attached once per zca-js listener: wiring the same listener twice
+    // would emit every message, receipt and reaction twice (callers start listening
+    // after each login, which creates a fresh listener)
+    if (this.wiredListeners.has(listener)) {
+      this.listenerManager.start(this.api);
+      return;
+    }
+    this.wiredListeners.add(listener);
     this.listenerState = 'reconnecting'; // until first "connected"
     // zca-js opens a fresh websocket per (re)connect — tap each one (E2EE DM reroute)
-    const listener = this.api.listener;
     listener.on('connected', () => installFrameTap(listener));
     // Zalo does not re-push messages missed while disconnected (restart, rebuild,
     // network drop). Once the session key arrives, ask for this session's recent
@@ -332,6 +368,25 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       console.warn(`getUserInfo(${uid}) failed:`, (err as Error).message);
       return null;
     }
+  }
+
+  /**
+   * Profiles of several contacts in one zca-js getUserInfo call (it accepts a list).
+   * Contacts Zalo returns nothing for (deleted / blocked accounts) are absent from the map.
+   *
+   * @throws when not logged in or the lookup fails (callers retry later)
+   */
+  async getUserProfiles(uids: string[]): Promise<Map<string, { displayName?: string; avatarUrl?: string }>> {
+    if (!this.api) throw new Error('Not logged in');
+    const info = await this.api.getUserInfo(uids);
+    const profiles = new Map<string, { displayName?: string; avatarUrl?: string }>();
+    for (const uid of uids) {
+      const profile = info.changed_profiles[uid] as
+        { displayName?: string; zaloName?: string; avatar?: string } | undefined;
+      if (profile)
+        profiles.set(uid, { displayName: profile.displayName || profile.zaloName, avatarUrl: profile.avatar });
+    }
+    return profiles;
   }
 
   /**
@@ -589,6 +644,9 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     const api = this.api;
     if (!api) return;
     const isGroup = threadType === 'group';
+    // A DM seen is addressed to our own uid; without it the event would go out with an
+    // empty recipient — skip instead (the next read after login sends it)
+    if (!isGroup && !this.ownId) return;
     try {
       await api.sendSeenEvent(
         {
@@ -643,10 +701,13 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     const api = this.api;
     if (!api) throw new Error('Not logged in');
     await this.rateLimiter.acquire();
-    const sendResult = await api.sendMessage(
-      { msg: caption, attachments: [{ data, filename, metadata: { totalSize: data.byteLength, width, height } }] },
-      threadId,
-      threadType === 'group' ? ThreadType.Group : ThreadType.User,
+    const sendResult = await withSendTimeout(
+      api.sendMessage(
+        { msg: caption, attachments: [{ data, filename, metadata: { totalSize: data.byteLength, width, height } }] },
+        threadId,
+        threadType === 'group' ? ThreadType.Group : ThreadType.User,
+      ),
+      'image send',
     );
     const sentMsgIds: string[] = [];
     if (sendResult.message?.msgId != null) sentMsgIds.push(String(sendResult.message.msgId));
@@ -673,16 +734,55 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     const api = this.api;
     if (!api) throw new Error('Not logged in');
     await this.rateLimiter.acquire();
-    const sendResult = await api.sendMessage(
-      { msg: caption, attachments: [{ data, filename, metadata: { totalSize: data.byteLength } }] },
-      threadId,
-      threadType === 'group' ? ThreadType.Group : ThreadType.User,
+    const sendResult = await withSendTimeout(
+      api.sendMessage(
+        { msg: caption, attachments: [{ data, filename, metadata: { totalSize: data.byteLength } }] },
+        threadId,
+        threadType === 'group' ? ThreadType.Group : ThreadType.User,
+      ),
+      'file send',
     );
     const sentMsgIds: string[] = [];
     if (sendResult.message?.msgId != null) sentMsgIds.push(String(sendResult.message.msgId));
     for (const attachment of sendResult.attachment ?? [])
       if (attachment?.msgId != null) sentMsgIds.push(String(attachment.msgId));
     return sentMsgIds;
+  }
+
+  /**
+   * Send a voice note Beeper→Zalo as a native Zalo voice message (not a file):
+   * the audio is uploaded to Zalo's file CDN with uploadAttachment, then posted with
+   * sendVoice, which only takes a URL. Zalo voice notes are AAC — pass AAC in an
+   * .m4a/.aac file; other codecs (ogg/opus) are not transcoded here.
+   * Waits for the outbound rate limiter.
+   *
+   * @param data AAC audio bytes (m4a container or raw ADTS)
+   * @param filename must end in .m4a or .aac (zca-js routes uploads by extension)
+   * @returns the sent msgId for echo suppression / recall
+   * @throws when not logged in, the upload yields no file URL, or a zca-js call fails
+   */
+  async sendVoice(
+    threadId: string,
+    threadType: ZaloThreadType,
+    data: Buffer,
+    filename: `${string}.${string}`,
+  ): Promise<string[]> {
+    const api = this.api;
+    if (!api) throw new Error('Not logged in');
+    const zaloThreadType = threadType === 'group' ? ThreadType.Group : ThreadType.User;
+    await this.rateLimiter.acquire();
+    const [uploaded] = await withSendTimeout(
+      api.uploadAttachment([{ data, filename, metadata: { totalSize: data.byteLength } }], threadId, zaloThreadType),
+      'voice upload',
+    );
+    if (!uploaded || uploaded.fileType === 'image' || !uploaded.fileUrl) {
+      throw new Error('voice upload returned no file URL');
+    }
+    const sent = await withSendTimeout(
+      api.sendVoice({ voiceUrl: uploaded.fileUrl }, threadId, zaloThreadType),
+      'voice send',
+    );
+    return sent?.msgId != null ? [String(sent.msgId)] : [];
   }
 
   /**

@@ -208,11 +208,20 @@ describe('renderExportRow', () => {
       imageUrl: 'https://photo-link-talk.zadn.vn/t',
     });
     const call = renderExportRow(
-      { ...base, fromUid: '0', msgType: 6, message: { action: 'recommened.calltime', title: 'Cuộc gọi đi' } },
+      {
+        ...base,
+        fromUid: '0',
+        msgType: 6,
+        message: {
+          action: 'recommened.calltime',
+          title: 'sendBubbleMessage',
+          params: '{"duration":10,"isCaller":1,"calltype":0}',
+        },
+      },
       'user',
       '456',
     );
-    expect(call?.content).toEqual({ msgtype: 'm.notice', body: '📞 Cuộc gọi đi' });
+    expect(call?.content).toEqual({ msgtype: 'm.notice', body: '📞 Cuộc gọi đi · 0:10' });
   });
 
   it("drops the owner's shadow copies (msgId_NNN with the real row present)", () => {

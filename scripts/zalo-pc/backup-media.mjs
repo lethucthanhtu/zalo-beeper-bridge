@@ -30,11 +30,17 @@ await initJpeg(await compileWasm('@jsquash/jpeg/codec/enc/mozjpeg_enc.wasm'));
 const MEDIA_TYPES = new Set([2, 3, 7, 18, 19]); // photo, voice, GIF, video, file
 const MIME = {
   jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  heic: 'image/heic',
   png: 'image/png',
   gif: 'image/gif',
   webp: 'image/webp',
   mp4: 'video/mp4',
   mov: 'video/quicktime',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  mp3: 'audio/mpeg',
+  amr: 'audio/amr',
   pdf: 'application/pdf',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

@@ -88,8 +88,14 @@ export class PuppetRegistry {
         .setDisplayName(name)
         .catch((err: Error) => console.warn(`setDisplayName(${mxid}) failed:`, err.message));
     }
-    // Avatar: synced once per puppet (Zalo avatars change rarely; re-sync is a later concern)
-    if (this.resolveProfile && this.store.getPuppetAvatarUrl(zaloUid) === null) {
+    // Avatar: synced once per puppet (Zalo avatars change rarely). A contact whose
+    // profile has no avatar is re-checked at most once per PROFILE_RECHECK_MS instead of
+    // on every message they send.
+    if (
+      this.resolveProfile &&
+      this.store.getPuppetAvatarUrl(zaloUid) === null &&
+      !this.store.isProfileFresh(zaloUid, PROFILE_RECHECK_MS)
+    ) {
       await this.syncAvatar(zaloUid, intent).catch((err: Error) =>
         console.warn(`avatar sync(${mxid}) failed:`, err.message),
       );
@@ -98,21 +104,89 @@ export class PuppetRegistry {
   }
 
   /**
-   * Downloads the contact's Zalo avatar (capped at 5 MiB), uploads it to Matrix,
-   * sets it as the ghost's avatar and records the source URL so it is not synced
-   * again. No-op when the profile has no avatar. Only called when `resolveProfile`
-   * is set.
-   * @throws On lookup, download, upload or profile-update failure.
+   * Looks the contact's profile up and applies its avatar (see applyProfile). No-op
+   * when the lookup is not possible yet (null). Only called when `resolveProfile` is set.
+   * @throws On download, upload or profile-update failure.
    */
   private async syncAvatar(zaloUid: string, intent: Intent): Promise<void> {
     const profile = await this.resolveProfile!(zaloUid);
-    if (!profile?.avatarUrl) return;
-    const { buffer, mimetype } = await fetchMediaCapped(profile.avatarUrl, 5 * 1024 * 1024);
-    const avatarMxc = await intent.uploadContent(buffer, { type: mimetype, name: 'zalo-avatar' });
-    await intent.setAvatarUrl(avatarMxc);
-    this.store.setPuppetAvatarUrl(zaloUid, profile.avatarUrl);
+    if (!profile) return;
+    await this.applyAvatar(zaloUid, intent, profile.avatarUrl);
+  }
+
+  /**
+   * Uploads the contact's Zalo avatar (capped at 5 MiB) as the ghost's avatar and records
+   * the source URL so it is not synced again. The profile counts as checked once it is
+   * settled — no avatar, or the avatar applied — but not after a failed download/upload,
+   * so a transient error is retried on the contact's next message instead of in 24 h.
+   * @throws On download, upload or profile-update failure.
+   */
+  private async applyAvatar(zaloUid: string, intent: Intent, avatarUrl: string | undefined): Promise<void> {
+    if (avatarUrl && this.store.getPuppetAvatarUrl(zaloUid) !== avatarUrl) {
+      const { buffer, mimetype } = await fetchMediaCapped(avatarUrl, 5 * 1024 * 1024);
+      const avatarMxc = await intent.uploadContent(buffer, { type: mimetype, name: 'zalo-avatar' });
+      await intent.setAvatarUrl(avatarMxc);
+      this.store.setPuppetAvatarUrl(zaloUid, avatarUrl);
+    }
+    this.store.markProfileChecked(zaloUid);
+  }
+
+  /**
+   * Fills in the name and avatar of every ghost still missing one — mostly ghosts the
+   * history importer created, which never had their profile looked up. DM contacts go
+   * first; profiles are fetched `batchSize` at a time with a pause between batches so
+   * Zalo isn't flooded. Contacts checked within PROFILE_RECHECK_MS are skipped.
+   * Failures are logged per contact and never thrown.
+   *
+   * @param fetchProfiles batched Zalo lookup: uid → profile (uids it cannot resolve are absent)
+   * @returns how many ghosts got a name / an avatar, and whether every batch was looked up
+   *   (`complete: false` → a lookup failed; the caller may retry later)
+   */
+  async repairMissingProfiles(
+    fetchProfiles: (uids: string[]) => Promise<Map<string, { displayName?: string; avatarUrl?: string }>>,
+    { batchSize = 50, pauseMs = 2_000 } = {},
+  ): Promise<{ named: number; withAvatar: number; checked: number; complete: boolean }> {
+    const pending = this.store.getPuppetsMissingProfile(PROFILE_RECHECK_MS);
+    const result = { named: 0, withAvatar: 0, checked: 0, complete: true };
+    for (let start = 0; start < pending.length; start += batchSize) {
+      const batch = pending.slice(start, start + batchSize);
+      const profiles = await fetchProfiles(batch).catch((err: Error) => {
+        console.warn('[bridge] profile repair lookup failed:', err.message);
+        return null;
+      });
+      if (!profiles) {
+        result.complete = false; // not logged in / Zalo refused — the caller retries on the next connect
+        break;
+      }
+      for (const uid of batch) {
+        const profile = profiles.get(uid);
+        if (!profile) {
+          this.store.markProfileChecked(uid); // unknown/deleted account: don't ask again today
+          continue;
+        }
+        result.checked++;
+        const intent = this.intentFor(uid);
+        if (profile.displayName && this.store.getPuppetDisplayName(uid) === null) {
+          this.store.upsertPuppet(uid, this.mxidFor(uid), profile.displayName);
+          await intent
+            .setDisplayName(profile.displayName)
+            .then(() => result.named++)
+            .catch((err: Error) => console.warn(`setDisplayName(${uid}) failed:`, err.message));
+        }
+        const hadAvatar = this.store.getPuppetAvatarUrl(uid) !== null;
+        await this.applyAvatar(uid, intent, profile.avatarUrl).catch((err: Error) =>
+          console.warn(`avatar sync(${uid}) failed:`, err.message),
+        );
+        if (!hadAvatar && this.store.getPuppetAvatarUrl(uid) !== null) result.withAvatar++;
+      }
+      if (start + batchSize < pending.length) await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    }
+    return result;
   }
 }
+
+/** How long a profile lookup counts as current (contacts without avatar aren't re-asked sooner). */
+const PROFILE_RECHECK_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Startup guard: computed ghost MXIDs must fall inside the appservice namespace.

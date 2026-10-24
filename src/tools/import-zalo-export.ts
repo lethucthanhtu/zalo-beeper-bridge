@@ -59,6 +59,7 @@ import { buildInboundMentions } from '../bridge/mentions.ts';
 import { SELF_BRIDGE_MARKER } from '../bridge/outbound-handler.ts';
 import { PortalManager } from '../bridge/portal-manager.ts';
 import { PuppetRegistry } from '../bridge/puppet-registry.ts';
+import { bridgeBranding } from '../matrix/network-branding.ts';
 
 // ---------------------------------------------------------------------------
 // Constants, CLI parsing and small helpers
@@ -105,19 +106,31 @@ function parseArgs(argv: string[]) {
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
-    if (arg === '--only') parsed.only = new Set(argv[++i]!.split(','));
+    /** The value following a flag — a missing one is a usage error, not a crash. */
+    const valueOf = (flag: string): string => {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value`);
+      return value;
+    };
+    /** A flag's value as a whole number ≥ min (NaN or fractions would break batching/pacing). */
+    const integerOf = (flag: string, min: number): number => {
+      const value = Number(valueOf(flag));
+      if (!Number.isInteger(value) || value < min) throw new Error(`${flag} needs a whole number ≥ ${min}`);
+      return value;
+    };
+    if (arg === '--only') parsed.only = new Set(valueOf(arg).split(','));
     else if (arg === '--dry-run') parsed.dryRun = true;
     else if (arg === '--probe') parsed.probe = true;
     else if (arg === '--rebuild') parsed.rebuild = true;
-    else if (arg === '--media-dir') parsed.mediaDir = argv[++i]!;
-    else if (arg === '--own-uid') parsed.ownUid = argv[++i]!;
-    else if (arg === '--carry-from') parsed.carryFrom = argv[++i]!.split(',');
+    else if (arg === '--media-dir') parsed.mediaDir = valueOf(arg);
+    else if (arg === '--own-uid') parsed.ownUid = valueOf(arg);
+    else if (arg === '--carry-from') parsed.carryFrom = valueOf(arg).split(',');
     else if (arg === '--remove-old') parsed.removeOld = true;
     else if (arg === '--verify') parsed.verify = true;
-    else if (arg === '--retire') parsed.retire = argv[++i]!.split(',');
-    else if (arg === '--batch') parsed.batch = Number(argv[++i]);
-    else if (arg === '--delay-ms') parsed.delayMs = Number(argv[++i]);
-    else if (arg === '--media-days') parsed.mediaDays = Number(argv[++i]);
+    else if (arg === '--retire') parsed.retire = valueOf(arg).split(',');
+    else if (arg === '--batch') parsed.batch = integerOf(arg, 1);
+    else if (arg === '--delay-ms') parsed.delayMs = integerOf(arg, 0);
+    else if (arg === '--media-days') parsed.mediaDays = integerOf(arg, 0);
     else if (!parsed.dir) parsed.dir = arg;
     else throw new Error(`unknown argument ${arg}`);
   }
@@ -218,9 +231,12 @@ type Item = { kind: 'export'; ev: ImportEvent; ts: number } | LiveItem;
 
 const cliOptions = parseArgs(process.argv.slice(2));
 const config = loadConfig();
-const registration = loadYaml(fs.readFileSync(config.matrix.registrationPath, 'utf8')) as { sender_localpart?: string };
+const registration = loadYaml(fs.readFileSync(config.matrix.registrationPath, 'utf8')) as {
+  id?: string;
+  sender_localpart?: string;
+};
 const bridgeAppId = (registration.sender_localpart ?? 'sh-zalobot').replace(/bot$/, '');
-const branding = { ...config.network, stateKey: `${config.matrix.domain}/${bridgeAppId}` };
+const branding = bridgeBranding(config, registration);
 const owner = config.matrix.owner;
 
 const exportMeta = JSON.parse(fs.readFileSync(path.join(cliOptions.dir, 'conversations.json'), 'utf8')) as ExportMeta;
@@ -834,19 +850,23 @@ async function prepend(key: string): Promise<number> {
     );
     const sentEventIds = await batchSend(portal.room_id, payloads, false);
     chunk.forEach((event, i) => {
+      const eventId = sentEventIds[i];
+      // No event id back = not stored in Beeper: leave it unrecorded so the completeness
+      // check reports it as missing and a re-run retries it
+      if (!eventId) return;
       // senderId stays null: Beeper reads of decade-old history must not emit Zalo "seen"
       store.recordMessage(
         event.msgId,
         portal.room_id,
-        sentEventIds[i] ?? null,
+        eventId,
         direction(event),
         null,
         event.cliMsgId ?? null,
         null,
         event.rawMsgType,
       );
+      imported++;
     });
-    imported += chunk.length;
     await sleep(cliOptions.delayMs);
   }
   console.log(`[import] ${key}: media ${JSON.stringify(stats)}`);

@@ -5,8 +5,9 @@
 // importer can post them like the live bridge does (m.image / m.sticker / m.video /
 // m.file / m.audio); `content` is the readable text used when no copy is reachable
 // (Zalo CDN links expire ~14 days after sending).
+import { CALL_ACTIONS, describeCall } from '../zalo/call-message.ts';
 import type { ZaloMention } from '../zalo/types.ts';
-import type { LinkPreview, MediaDescriptor } from './media-content.ts';
+import { toMatrixWaveform, type LinkPreview, type MediaDescriptor } from './media-content.ts';
 
 /** One exported Zalo PC message row (subset of fields the exporter keeps). */
 export type ExportRow = {
@@ -187,6 +188,7 @@ function render(row: ExportRow): Rendered {
     }
     case 3: {
       const durationMs = positiveNumber(params.duration);
+      const waveform = toMatrixWaveform(params.waveformSamples);
       const secs = durationMs ? ` ${Math.round(durationMs / 1000)}s` : '';
       return {
         body: `🎤 [Tin nhắn thoại${secs} — không còn trên máy chủ Zalo]`,
@@ -194,9 +196,10 @@ function render(row: ExportRow): Rendered {
         media: {
           kind: 'audio',
           urls: uniqueHttpUrls([asText(params.m4a), asText(attachment.href)]),
-          filename: 'zalo-voice.m4a',
+          filename: 'Voice message.m4a',
           durationMs,
           size: positiveNumber(params.fileSize),
+          ...(waveform ? { waveform } : {}),
         },
       };
     }
@@ -254,8 +257,9 @@ function render(row: ExportRow): Rendered {
       };
     }
     case 6: {
-      if (asText(attachment.action) === 'recommened.misscall' || asText(attachment.action) === 'recommened.calltime') {
-        return { body: `📞 ${title || 'Cuộc gọi'}`, notice: true };
+      if (CALL_ACTIONS.has(asText(attachment.action))) {
+        // the title is the literal "sendBubbleMessage" — the call details are in params
+        return { body: describeCall(asText(attachment.action), attachment.params), notice: true };
       }
       const href = asText(attachment.href);
       const label = title && title !== href ? title : asText(params.mediaTitle) || desc;

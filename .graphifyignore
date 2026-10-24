@@ -1,0 +1,4 @@
+# vendored agent skills and tool output are not part of the bridge
+.claude/
+.archify/
+graphify-out/

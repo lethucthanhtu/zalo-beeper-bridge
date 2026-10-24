@@ -7,3 +7,4 @@ container-config/
 data/
 *.db
 .claude/skills/
+.archify/

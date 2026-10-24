@@ -93,7 +93,12 @@ export function parseOutboundMentions(
   const searchStartByLabel = new Map<string, number>(); // label → search start (handle repeats)
   let match: RegExpExecArray | null;
   while ((match = pillAnchorPattern.exec(formattedBody)) !== null) {
-    const mxid = decodeURIComponent(match[1]!);
+    let mxid: string;
+    try {
+      mxid = decodeURIComponent(match[1]!);
+    } catch {
+      continue; // malformed %-escape in the pill href — skip this pill, keep the message
+    }
     const label = match[2]!
       .replace(/<[^>]+>/g, '') // strip any nested tags in the pill label
       .replace(/&amp;/g, '&')

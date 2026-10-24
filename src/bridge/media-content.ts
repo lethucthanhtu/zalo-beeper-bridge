@@ -3,6 +3,7 @@
 // Callers resolve the bytes (CDN download or backup copy); this module uploads them and
 // shapes the event (m.image / m.video / m.file / m.audio voice / m.sticker), and turns a
 // Zalo link card into a Beeper link preview (com.beeper.linkpreviews).
+import { adtsToM4a, isAdts } from './audio-remux.ts';
 import { fetchMediaCapped, sniffMimetype } from './media-handler.ts';
 
 export type MediaKind = 'image' | 'sticker' | 'video' | 'file' | 'audio';
@@ -23,7 +24,43 @@ export type MediaDescriptor = {
   size?: number;
   /** Zalo sticker id — stickers are cached per id */
   stickerId?: number;
+  /** voice-note waveform scaled to 0–1024 (MSC3246), from Zalo's waveformSamples */
+  waveform?: number[];
 };
+
+/** Most waveform bars sent with a voice note. */
+const MAX_WAVEFORM_POINTS = 100;
+
+/**
+ * Zalo's voice `waveformSamples` (amplitudes, a JSON array or array-like string) scaled
+ * to the 0–1024 range Matrix voice bubbles expect (MSC3246); the loudest sample maps
+ * to 1024, and long sample lists are reduced to MAX_WAVEFORM_POINTS peaks. Returns
+ * undefined when there are no usable samples.
+ */
+export function toMatrixWaveform(samples: unknown): number[] | undefined {
+  let values: unknown = samples;
+  if (typeof values === 'string') {
+    try {
+      values = JSON.parse(values);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!Array.isArray(values)) return undefined;
+  const amplitudes = values.map(Number).filter((value) => Number.isFinite(value) && value >= 0);
+  const loudest = Math.max(0, ...amplitudes);
+  if (!amplitudes.length || loudest === 0) return undefined;
+  // Keep events small: at most MAX_WAVEFORM_POINTS bars (MSC3246 suggests ~30–120),
+  // each the peak of its slice of samples
+  const points = Math.min(amplitudes.length, MAX_WAVEFORM_POINTS);
+  return Array.from({ length: points }, (_, index) => {
+    const slice = amplitudes.slice(
+      Math.floor((index * amplitudes.length) / points),
+      Math.floor(((index + 1) * amplitudes.length) / points),
+    );
+    return Math.round((Math.max(...slice) / loudest) * 1024);
+  });
+}
 
 /** Zalo link card → Beeper link preview. */
 export type LinkPreview = {
@@ -97,13 +134,29 @@ export async function buildMediaEvent(
   bytes: MediaBytes,
   overrides: { filename?: string; mxcUrl?: string } = {},
 ): Promise<{ type: string; content: Record<string, unknown>; mxcUrl: string }> {
-  // A voice note must carry an audio type or clients won't play it (Zalo mislabels it)
-  if (media.kind === 'audio' && !bytes.mimetype.startsWith('audio/')) bytes = { ...bytes, mimetype: 'audio/aac' };
-  const filename = overrides.filename ?? media.filename ?? `zalo-${media.kind}.${fileExtensionFor(bytes.mimetype)}`;
+  let durationMs = media.durationMs;
+  let voiceFilename: string | undefined;
+  if (media.kind === 'audio') {
+    // Zalo voice notes are raw ADTS AAC mislabelled image/jpeg: repackage them as M4A
+    // (Beeper's own voice-note container) so every client can play them; keep the raw
+    // stream as audio/aac when it is not clean ADTS
+    const remuxed = isAdts(bytes.buffer) ? adtsToM4a(bytes.buffer) : null;
+    if (remuxed) {
+      bytes = { ...bytes, buffer: remuxed.m4a, mimetype: 'audio/mp4' };
+      durationMs ??= remuxed.durationMs;
+      voiceFilename = 'Voice message.m4a';
+    } else if (!bytes.mimetype.startsWith('audio/')) {
+      bytes = { ...bytes, mimetype: 'audio/aac' };
+      voiceFilename = 'Voice message.aac';
+    }
+  }
+  // The name must match the actual container (players pick a parser from it)
+  const filename =
+    overrides.filename ?? voiceFilename ?? media.filename ?? `zalo-${media.kind}.${fileExtensionFor(bytes.mimetype)}`;
   const mxcUrl = overrides.mxcUrl ?? (await upload(bytes.buffer, { type: bytes.mimetype, name: filename }));
   const width = media.width ?? bytes.width;
   const height = media.height ?? bytes.height;
-  const duration = media.durationMs ? Math.round(media.durationMs) : undefined;
+  const duration = durationMs ? Math.round(durationMs) : undefined;
   const info = {
     mimetype: bytes.mimetype,
     size: bytes.buffer.byteLength,
@@ -117,7 +170,11 @@ export async function buildMediaEvent(
   const content: Record<string, unknown> = { msgtype, body: media.caption || filename, url: mxcUrl, info };
   if (media.caption || media.kind === 'file') content.filename = filename;
   if (media.kind === 'audio') {
-    content['org.matrix.msc1767.audio'] = duration ? { duration } : {};
+    // MSC1767 audio: duration in ms + waveform (MSC3246: values 0–1024) for the voice bubble
+    content['org.matrix.msc1767.audio'] = {
+      ...(duration ? { duration } : {}),
+      waveform: media.waveform ?? [],
+    };
     content['org.matrix.msc3245.voice'] = {};
   }
   return { type: 'm.room.message', content, mxcUrl };

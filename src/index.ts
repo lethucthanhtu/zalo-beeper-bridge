@@ -17,7 +17,7 @@ import { createBridge, startBridge } from './matrix/appservice.ts';
 import { AVATAR_MAX_BYTES, createZaloStatePublisher } from './matrix/beeper-bridge-state.ts';
 import { fetchMediaCapped } from './bridge/media-handler.ts';
 import { handleBotEvent, type BotCommandContext } from './matrix/bot-commands.ts';
-import { ensureNetworkIdentity } from './matrix/network-branding.ts';
+import { bridgeBranding, ensureNetworkIdentity } from './matrix/network-branding.ts';
 import { ZaloClient } from './zalo/zalo-client.ts';
 
 const config = loadConfig();
@@ -73,21 +73,20 @@ const bridge = createBridge(
 );
 botContext.bridge = bridge;
 
-// Registration holds the as_token, ghost namespace, and the appservice id used
-// to build the bridge-info state_key (<domain>/<appservice-id>, e.g. beeper.local/sh-zalo)
+// Registration holds the as_token, ghost namespace, and the appservice id used to
+// build the bridge-info state_key (<domain>/<registration id> — see network-branding.ts)
 const registration = loadYaml(fs.readFileSync(config.matrix.registrationPath, 'utf8')) as {
+  id?: string;
   as_token?: string;
   sender_localpart?: string;
   namespaces?: { users?: Array<{ regex: string }> };
 };
 const asToken = registration.as_token;
 if (!asToken) throw new Error(`No as_token in ${config.matrix.registrationPath}`);
-// appservice id = sender_localpart minus the trailing "bot" (sh-zalobot → sh-zalo)
+// bridge name = sender_localpart minus the trailing "bot" (sh-zalobot → sh-zalo):
+// used for the remote-state endpoint and the double-puppet source tag
 const bridgeAppId = (registration.sender_localpart ?? 'sh-zalobot').replace(/bot$/, '');
-const branding = {
-  ...config.network,
-  stateKey: `${config.matrix.domain}/${bridgeAppId}`,
-};
+const branding = bridgeBranding(config, registration);
 
 // Shared between in/out handlers: event_ids the bridge posted as the owner (own
 // phone messages) + events already sent outbound — prevents re-sending / loops.
@@ -143,10 +142,38 @@ const publishZaloState = createZaloStatePublisher({
   },
 });
 
+// Ghost name/avatar repair runs once per process: ghosts created by the history
+// importer never had their Zalo profile looked up (no names, no avatars).
+// Zalo rate-limits getUserInfo ("Vượt quá số request cho phép" at 50 uids / 2 s), so
+// the repair is paced gently and, after a refused lookup, waits an hour before the
+// next connect may retry — protecting the account matters more than finishing fast.
+const PROFILE_REPAIR_PACE = { batchSize: 20, pauseMs: 15_000 };
+const PROFILE_REPAIR_RETRY_AFTER_MS = 60 * 60 * 1000;
+let profileRepairStarted = false;
+let profileRepairFailedAt = 0;
+
 // Zalo listener lifecycle → logs + Beeper remote-account state
 zalo.on('connected', () => {
   console.log('[zalo] listener connected');
   void portals.repairDmGhostNames().catch((err) => console.warn('DM name repair failed:', err));
+  if (!profileRepairStarted && Date.now() - profileRepairFailedAt >= PROFILE_REPAIR_RETRY_AFTER_MS) {
+    profileRepairStarted = true;
+    void puppets
+      .repairMissingProfiles((uids) => zalo.getUserProfiles(uids), PROFILE_REPAIR_PACE)
+      .then(({ named, withAvatar, checked, complete }) => {
+        console.log(`[bridge] profile repair: ${checked} profiles checked, ${named} named, ${withAvatar} avatars set`);
+        // a lookup failed mid-way (e.g. Zalo refused): retry on a connect after the cooldown
+        if (!complete) {
+          profileRepairStarted = false;
+          profileRepairFailedAt = Date.now();
+        }
+      })
+      .catch((err) => {
+        profileRepairStarted = false;
+        profileRepairFailedAt = Date.now();
+        console.warn('profile repair failed:', err);
+      });
+  }
   void publishZaloState('CONNECTED');
 });
 zalo.on('reconnecting', (attempt, delayMs) => {

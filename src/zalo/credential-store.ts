@@ -58,12 +58,13 @@ function decrypt(payload: string, key: Buffer): string {
 }
 
 /**
- * Reads saved zca-js credentials (encrypted, or legacy plaintext JSON). For an
- * encrypted file whose key file is missing, a new key is generated (and decryption
- * then fails → null).
+ * Reads saved zca-js credentials (encrypted, or legacy plaintext JSON). Never creates
+ * a key: an encrypted file whose key file is missing is reported and ignored, so the
+ * file stays decryptable if the key is restored (a fresh key is only generated when
+ * new credentials are saved after the next login).
  *
- * @returns the credentials, or null when the file is missing, corrupt or cannot be
- *   decrypted (the latter two logged as a warning)
+ * @returns the credentials, or null when the file is missing, its key is missing, or it
+ *   is corrupt or cannot be decrypted (the last three logged as a warning)
  * @throws when the existing credentials file cannot be read
  */
 export function loadCredentials(credsPath: string): Credentials | null {
@@ -71,7 +72,12 @@ export function loadCredentials(credsPath: string): Credentials | null {
   const fileContents = fs.readFileSync(credsPath, 'utf8');
   try {
     if (fileContents.startsWith(`${MAGIC}:`)) {
-      return JSON.parse(decrypt(fileContents, loadOrCreateKey(credsPath))) as Credentials;
+      const keyPath = keyPathFor(credsPath);
+      if (!fs.existsSync(keyPath)) {
+        console.warn(`Credentials at ${credsPath} are encrypted but their key ${keyPath} is missing — log in again`);
+        return null;
+      }
+      return JSON.parse(decrypt(fileContents, Buffer.from(fs.readFileSync(keyPath, 'utf8'), 'base64'))) as Credentials;
     }
     return JSON.parse(fileContents) as Credentials; // legacy plaintext — re-encrypted on next save
   } catch {

@@ -98,29 +98,53 @@ export async function downloadMatrixMedia(
   };
 }
 
+/** Redirect hops a media download may follow (each one re-checked against the allowlist). */
+const MAX_REDIRECTS = 5;
+
 /**
- * Guarded download: https-only, Zalo CDN hosts, hard timeout, streamed byte cap.
+ * Throws unless `url` is an https URL on an allowlisted Zalo CDN host.
+ * @throws Error naming the rejected protocol or host
+ */
+export function assertZaloMediaUrl(url: string): void {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:') throw new Error(`refusing non-https media URL (${parsed.protocol})`);
+  if (!ALLOWED_HOST_SUFFIXES.some((suffix) => parsed.hostname.endsWith(suffix))) {
+    throw new Error(`refusing media host outside Zalo CDN (${parsed.hostname})`);
+  }
+}
+
+/**
+ * Guarded download: https-only, Zalo CDN hosts (on every redirect hop), hard timeout,
+ * streamed byte cap.
  *
  * @param url - Zalo CDN media URL (untrusted, from a message payload).
  * @param maxBytes - Streamed size cap; the download aborts once exceeded.
- * @param timeoutMs - Hard timeout for the whole request.
+ * @param timeoutMs - Hard timeout for the whole request, redirects included.
  * @returns The bytes and the declared mimetype (`application/octet-stream` when absent);
  *   callers should still run {@link sniffMimetype} since Zalo mislabels media.
- * @throws On a non-https URL, a host outside ALLOWED_HOST_SUFFIXES, non-2xx answer, empty body,
- *   an HTML/JSON error page, timeout or the size cap.
+ * @throws On a non-https URL or a host outside ALLOWED_HOST_SUFFIXES (also for a redirect
+ *   target), more than MAX_REDIRECTS hops, non-2xx answer, empty body, an HTML/JSON error
+ *   page, timeout or the size cap.
  */
 export async function fetchMediaCapped(
   url: string,
   maxBytes: number,
   timeoutMs = FETCH_TIMEOUT_MS,
 ): Promise<FetchedMedia> {
-  const parsed = new URL(url);
-  if (parsed.protocol !== 'https:') throw new Error(`refusing non-https media URL (${parsed.protocol})`);
-  if (!ALLOWED_HOST_SUFFIXES.some((suffix) => parsed.hostname.endsWith(suffix))) {
-    throw new Error(`refusing media host outside Zalo CDN (${parsed.hostname})`);
+  // Redirects are followed by hand so every hop passes the https + Zalo-host check —
+  // fetch's automatic following would let a CDN redirect reach any host (SSRF)
+  const signal = AbortSignal.timeout(timeoutMs);
+  let currentUrl = url;
+  let response: Response;
+  for (let hop = 0; ; hop++) {
+    assertZaloMediaUrl(currentUrl);
+    response = await fetch(currentUrl, { signal, redirect: 'manual' });
+    const location = response.headers.get('location');
+    if (response.status < 300 || response.status >= 400 || !location) break;
+    await response.body?.cancel(); // release the redirect response's connection
+    if (hop >= MAX_REDIRECTS) throw new Error(`media download: too many redirects (>${MAX_REDIRECTS})`);
+    currentUrl = new URL(location, currentUrl).toString();
   }
-
-  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) throw new Error(`media download failed: HTTP ${response.status}`);
   if (!response.body) throw new Error('media download returned no body');
   // Expired links can answer 200 with an HTML/JSON error page instead of the media

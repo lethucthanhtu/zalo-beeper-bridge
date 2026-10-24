@@ -35,3 +35,10 @@ describe('RateLimiter (token bucket)', () => {
     expect(() => new RateLimiter(0)).toThrow();
   });
 });
+
+describe('RateLimiter burst validation', () => {
+  it('rejects a bucket that can never hold a whole token', () => {
+    expect(() => new RateLimiter(60, 0)).toThrow(/burst/);
+    expect(() => new RateLimiter(60, 0.5)).toThrow(/burst/);
+  });
+});

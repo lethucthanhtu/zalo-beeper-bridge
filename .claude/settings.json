@@ -22,5 +22,8 @@
         ]
       }
     ]
+  },
+  "env": {
+    "ARCHIFY_UPDATE_CHECK_DISABLED": "1"
   }
 }

@@ -116,12 +116,21 @@ export class PortalManager {
         intent,
         portal.room_id,
         portal.thread_id,
-        portal.name ?? this.branding.name,
+        this.channelName(portal),
         portal.thread_type,
         this.branding,
         botMxid,
       );
     }
+  }
+
+  /**
+   * `channel.displayname` for a portal's bridge-info: the group name, or for a DM the
+   * contact's name (DM portals often have no stored name; "Zalo" was a poor stand-in).
+   */
+  private channelName(portal: PortalRow): string {
+    const contactName = portal.thread_type === 'user' ? this.store.getPuppetDisplayName(portal.thread_id) : null;
+    return portal.name ?? contactName ?? portal.thread_id;
   }
 
   /** True when the Matrix room is a portal (delegates to the store). */
@@ -201,7 +210,7 @@ export class PortalManager {
       brandIntent,
       row.room_id,
       row.thread_id,
-      row.name ?? this.branding.name,
+      this.channelName(row),
       row.thread_type,
       this.branding,
       this.bridge.getBot().getUserId(),

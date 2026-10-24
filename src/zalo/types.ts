@@ -6,6 +6,8 @@ export type ZaloThreadType = 'user' | 'group';
 
 export type ZaloContent =
   | { kind: 'text'; text: string; linkPreview?: LinkPreview }
+  /** system-style line posted as m.notice (e.g. a call log bubble) */
+  | { kind: 'notice'; text: string }
   | { kind: 'photo'; url: string; thumbUrl?: string; width?: number; height?: number; caption?: string }
   | { kind: 'sticker'; id: number; catId: number }
   /** video / file / voice / GIF / doodle — rendered by bridge/media-content.ts */
