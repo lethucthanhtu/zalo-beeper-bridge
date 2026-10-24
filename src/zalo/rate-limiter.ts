@@ -2,6 +2,8 @@
 // A burst of tokens lets normal back-and-forth chatting go through instantly;
 // only sustained sending is paced (protects the main account without adding
 // visible latency to real conversations). Refills at `perMinute` tokens/min.
+
+/** Token bucket with serialized acquires; see the file header for the pacing rationale. */
 export class RateLimiter {
   private readonly capacity: number;
   private readonly refillPerMs: number;
@@ -11,27 +13,39 @@ export class RateLimiter {
   // same snapshot and fire together (thundering herd defeating the pacing).
   private chain: Promise<void> = Promise.resolve();
 
+  /**
+   * Creates a full bucket.
+   *
+   * @param perMinute sustained rate (tokens refilled per minute)
+   * @param burst bucket capacity; defaults to `perMinute` (at least 1)
+   * @throws when perMinute is not positive
+   */
   constructor(perMinute: number, burst?: number) {
-    if (perMinute <= 0) throw new Error("perMinute must be > 0");
+    if (perMinute <= 0) throw new Error('perMinute must be > 0');
     this.capacity = burst ?? Math.max(perMinute, 1);
     this.refillPerMs = perMinute / 60_000;
     this.tokens = this.capacity;
     this.lastRefill = Date.now();
   }
 
+  /** Adds the tokens accrued since the last refill, capped at capacity. */
   private refill(): void {
     const now = Date.now();
     this.tokens = Math.min(this.capacity, this.tokens + (now - this.lastRefill) * this.refillPerMs);
     this.lastRefill = now;
   }
 
-  /** Resolves immediately while burst tokens remain; otherwise waits for one to refill. */
+  /**
+   * Resolves immediately while burst tokens remain; otherwise waits for one to refill.
+   * Calls are queued so they are granted one at a time in call order.
+   */
   acquire(): Promise<void> {
     const result = this.chain.then(() => this.doAcquire());
     this.chain = result.catch(() => undefined); // keep the chain alive on rejection
     return result;
   }
 
+  /** Takes one token, sleeping first until a whole token has refilled if the bucket is short. */
   private async doAcquire(): Promise<void> {
     this.refill();
     if (this.tokens < 1) {

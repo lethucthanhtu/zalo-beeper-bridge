@@ -1,13 +1,16 @@
 // Zalo→Matrix ephemeral signals: read receipts and typing indicators.
 // One-way only — zca-js exposes no API to push seen/typing back to Zalo.
-import type { MappingStore } from "./mapping-store.ts";
-import type { PuppetRegistry } from "./puppet-registry.ts";
-import { zaloToEmoji } from "../zalo/reaction-map.ts";
-import type { ZaloClient } from "../zalo/zalo-client.ts";
-import type { ZaloReactionEvent, ZaloSeenEvent, ZaloTypingEvent } from "../zalo/types.ts";
+// (Also hosts the owner→Zalo receipt/typing handlers and inbound reactions.)
+import type { MappingStore } from './mapping-store.ts';
+import type { PuppetRegistry } from './puppet-registry.ts';
+import { zaloToEmoji } from '../zalo/reaction-map.ts';
+import type { ZaloClient } from '../zalo/zalo-client.ts';
+import type { ZaloReactionEvent, ZaloSeenEvent, ZaloTypingEvent } from '../zalo/types.ts';
 
+/** A ghost's typing indicator is cleared after this long without a new typing event. */
 const TYPING_STOP_MS = 8_000;
 
+/** Mirrors read receipts, typing indicators and reactions between Zalo and Matrix portals. */
 export class PresenceHandler {
   private readonly store: MappingStore;
   private readonly puppets: PuppetRegistry;
@@ -19,7 +22,20 @@ export class PresenceHandler {
   private readonly zalo: ZaloClient;
   private readonly ownerUserId: string;
 
-  constructor(store: MappingStore, puppets: PuppetRegistry, zalo: ZaloClient, ownerUserId: string, getOwnZaloId: () => string | null) {
+  /**
+   * @param store - Portal and message mappings.
+   * @param puppets - Ghost intents for Zalo users.
+   * @param zalo - Zalo client, used to send seen/typing to Zalo.
+   * @param ownerUserId - Owner's Matrix ID (whose receipts/typing are mirrored to Zalo).
+   * @param getOwnZaloId - Own Zalo uid (null while logged out).
+   */
+  constructor(
+    store: MappingStore,
+    puppets: PuppetRegistry,
+    zalo: ZaloClient,
+    ownerUserId: string,
+    getOwnZaloId: () => string | null,
+  ) {
     this.store = store;
     this.puppets = puppets;
     this.zalo = zalo;
@@ -27,14 +43,22 @@ export class PresenceHandler {
     this.getOwnZaloId = getOwnZaloId;
   }
 
-  /** Owner read a portal in Beeper → mark seen on Zalo (m.receipt EDU). */
+  /**
+   * Owner read a portal in Beeper → mark seen on Zalo (m.receipt EDU).
+   * Does nothing when the room is not a portal, the owner has no `m.read` receipt in the EDU,
+   * or the read event has no seen target with cliMsgId + senderId.
+   *
+   * @param roomId - Room the receipt EDU belongs to.
+   * @param content - EDU content: `{ [eventId]: { 'm.read': { [userId]: ... } } }`.
+   * @throws Errors from `zalo.sendSeen`.
+   */
   async handleOwnerReceipt(roomId: string, content: Record<string, unknown>): Promise<void> {
     const portal = this.store.getPortalByRoom(roomId);
     if (!portal) return;
     // Find the most recent read event id belonging to the owner
     let readEventId: string | null = null;
     for (const [eventId, receipts] of Object.entries(content)) {
-      const readBy = (receipts as { "m.read"?: Record<string, unknown> })["m.read"];
+      const readBy = (receipts as { 'm.read'?: Record<string, unknown> })['m.read'];
       if (readBy && this.ownerUserId in readBy) readEventId = eventId;
     }
     if (!readEventId) return;
@@ -46,11 +70,18 @@ export class PresenceHandler {
       target.zaloMsgId,
       target.cliMsgId,
       target.senderId,
-      target.msgType ?? "webchat",
+      target.msgType ?? 'webchat',
     );
   }
 
-  /** Owner typing in a portal → show typing on Zalo (m.typing EDU). */
+  /**
+   * Owner typing in a portal → show typing on Zalo (m.typing EDU).
+   * Currently not wired up in index.ts (Beeper→Zalo typing disabled on the owner's request).
+   *
+   * @param roomId - Room the typing EDU belongs to.
+   * @param userIds - Users currently typing; nothing happens unless the owner is among them.
+   * @throws Errors from `zalo.sendTypingToZalo`.
+   */
   async handleOwnerTyping(roomId: string, userIds: string[]): Promise<void> {
     if (!userIds.includes(this.ownerUserId)) return;
     const portal = this.store.getPortalByRoom(roomId);
@@ -58,6 +89,13 @@ export class PresenceHandler {
     await this.zalo.sendTypingToZalo(portal.thread_id, portal.thread_type);
   }
 
+  /**
+   * Zalo "seen" event → Matrix read receipts sent by the ghosts of the readers.
+   * Skips unknown portals and messages that were never bridged; per-ghost receipt failures
+   * are logged, not thrown.
+   *
+   * @param event - Zalo seen event (msgId, thread and, for groups, the reader uids).
+   */
   async handleSeen(event: ZaloSeenEvent): Promise<void> {
     const portal = this.store.getPortalByThread(event.threadId);
     if (!portal) return;
@@ -68,10 +106,10 @@ export class PresenceHandler {
     // Never emit a receipt for the owner's own uid — that would join an
     // owner-doppelganger ghost into the room ("seen by @sh-zalo_<own-uid>").
     const ownId = this.getOwnZaloId();
-    const uids = (event.threadType === "user" ? [event.threadId] : event.seenUids).filter(
-      (uid) => String(uid) !== ownId && uid !== "",
+    const readerUids = (event.threadType === 'user' ? [event.threadId] : event.seenUids).filter(
+      (uid) => String(uid) !== ownId && uid !== '',
     );
-    for (const uid of uids) {
+    for (const uid of readerUids) {
       await this.puppets
         .intentFor(uid)
         .sendReadReceipt(portal.room_id, eventId)
@@ -79,7 +117,13 @@ export class PresenceHandler {
     }
   }
 
-  /** Inbound reaction (Zalo→Beeper): ghost annotates the bridged Matrix event. */
+  /**
+   * Inbound reaction (Zalo→Beeper): ghost annotates the bridged Matrix event.
+   * Removals (no icon) are skipped; a failed send is logged, not thrown.
+   *
+   * @param event - Zalo reaction event.
+   * @throws Errors from `puppets.ensurePuppet` (ghost registration/profile).
+   */
   async handleReaction(event: ZaloReactionEvent): Promise<void> {
     // Our own reaction (made from Beeper) echoes back via selfListen — it's already
     // shown as the owner's reaction, so re-posting it as a ghost of ourselves would
@@ -91,26 +135,33 @@ export class PresenceHandler {
     // ensurePuppet so the reacting ghost has a name + avatar (they may not have messaged yet)
     const intent = await this.puppets.ensurePuppet(event.senderId, event.senderName);
     await intent
-      .sendEvent(target.roomId, "m.reaction", {
-        "m.relates_to": { rel_type: "m.annotation", event_id: target.eventId, key: zaloToEmoji(event.icon) },
+      .sendEvent(target.roomId, 'm.reaction', {
+        'm.relates_to': { rel_type: 'm.annotation', event_id: target.eventId, key: zaloToEmoji(event.icon) },
       })
-      .catch((err: Error) => console.warn("inbound reaction failed:", err.message));
+      .catch((err: Error) => console.warn('inbound reaction failed:', err.message));
   }
 
+  /**
+   * Zalo typing event → the sender's ghost shows typing in the portal, auto-cleared after
+   * TYPING_STOP_MS (Zalo sends no "stopped typing"). A new event for the same room/user resets
+   * the timer. Matrix typing errors are swallowed (typing is cosmetic).
+   *
+   * @param event - Zalo typing event.
+   */
   async handleTyping(event: ZaloTypingEvent): Promise<void> {
     if (event.uid === this.getOwnZaloId()) return;
     const portal = this.store.getPortalByThread(event.threadId);
     if (!portal) return;
     const intent = this.puppets.intentFor(event.uid);
-    const key = `${portal.room_id}|${event.uid}`;
+    const timerKey = `${portal.room_id}|${event.uid}`;
 
     await intent.sendTyping(portal.room_id, true).catch(() => undefined);
-    const existing = this.typingTimers.get(key);
-    if (existing) clearTimeout(existing);
+    const existingTimer = this.typingTimers.get(timerKey);
+    if (existingTimer) clearTimeout(existingTimer);
     this.typingTimers.set(
-      key,
+      timerKey,
       setTimeout(() => {
-        this.typingTimers.delete(key);
+        this.typingTimers.delete(timerKey);
         void intent.sendTyping(portal.room_id, false).catch(() => undefined);
       }, TYPING_STOP_MS),
     );

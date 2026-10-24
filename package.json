@@ -8,7 +8,9 @@
     "dev": "node src/index.ts",
     "typecheck": "tsc",
     "test": "vitest run",
-    "lint": "eslint"
+    "lint": "eslint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "keywords": [],
   "author": "",
@@ -30,6 +32,8 @@
     "@types/better-sqlite3": "7.6.13",
     "@types/node": "26.1.0",
     "eslint": "10.6.0",
+    "eslint-config-prettier": "9.1.2",
+    "prettier": "3.9.9",
     "typescript": "6.0.3",
     "typescript-eslint": "8.62.1",
     "vitest": "4.1.9"

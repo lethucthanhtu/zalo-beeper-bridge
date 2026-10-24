@@ -9,11 +9,11 @@ and `bbctl proxy`. They share the container's loopback, so `registration.yaml` k
 
 ## 1. Inputs (`container-config/`, gitignored)
 
-| File | Where it comes from |
-|------|---------------------|
-| `config.yaml` | `cp config.yaml.example` and fill in (relative paths are fine — they resolve to `/data`) |
-| `registration.yaml` | `bbctl register -o registration.yaml sh-zalo`, with `url: http://localhost:29350` |
-| `bbctl-config.json` *(optional)* | your existing `~/.config/bbctl/config.json` (Beeper login; `bbctl proxy` needs it) |
+| File                             | Where it comes from                                                                      |
+| -------------------------------- | ---------------------------------------------------------------------------------------- |
+| `config.yaml`                    | `cp config.yaml.example` and fill in (relative paths are fine — they resolve to `/data`) |
+| `registration.yaml`              | `bbctl register -o registration.yaml sh-zalo`, with `url: http://localhost:29350`        |
+| `bbctl-config.json` _(optional)_ | your existing `~/.config/bbctl/config.json` (Beeper login; `bbctl proxy` needs it)       |
 
 Instead of `bbctl-config.json` you can set `MATRIX_ACCESS_TOKEN` (the `access_token`
 from that file), or log in inside the container once:
@@ -82,11 +82,11 @@ re-login silently (`[zalo] re-logged in from saved credentials`).
 
 ## Troubleshooting
 
-| Symptom | Check |
-|---------|-------|
-| Chats missing in Beeper although the log shows `[zalo] in …` | You were left at "invite" (old versions). Restart: startup joins you into every portal |
-| No `[zalo] in/own …` lines at all | Close Zalo Web/PC tabs (one web session only), then `logout` + `login` |
-| Unknown protocol frames | `ZALO_WS_TRACE=1 podman compose up -d` logs every frame header (cmd/size only, never content) |
+| Symptom                                                      | Check                                                                                         |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| Chats missing in Beeper although the log shows `[zalo] in …` | You were left at "invite" (old versions). Restart: startup joins you into every portal        |
+| No `[zalo] in/own …` lines at all                            | Close Zalo Web/PC tabs (one web session only), then `logout` + `login`                        |
+| Unknown protocol frames                                      | `ZALO_WS_TRACE=1 podman compose up -d` logs every frame header (cmd/size only, never content) |
 
 Each bridged Zalo message logs one line with ids only: `[zalo] in group text thread=… msg=…`.
 End-to-end-encrypted 1-1 pushes (cmd 551, dropped by zca-js) are rerouted to the DM handler.

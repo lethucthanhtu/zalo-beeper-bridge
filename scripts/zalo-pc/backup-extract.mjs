@@ -11,87 +11,112 @@
 //   default extracts only database/*.zdb; --all also extracts media; --list prints
 //   "size<TAB>path" for every entry; --peek only checks the key on the first block.
 // The backup file is only read. The UIN is read from a file so it never lands in shell history.
-import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
-const [file, uinFile, outDir, flag] = process.argv.slice(2);
-if (!file || !uinFile) throw new Error("usage: node backup-extract.mjs <backup.zl.zip> <uinFile> <outDir> [--peek|--list|--all]");
-const uin = fs.readFileSync(uinFile, "utf8").trim();
-const iv = Buffer.from("zie" + uin.slice(0, 13));
-if (iv.length !== 16) throw new Error("UIN too short for the IV — wrong key file?");
-const decipher = crypto.createDecipheriv("aes-256-cbc", crypto.createHash("sha256").update(uin).digest(), iv);
+const [backupFile, uinFile, outDir, flag] = process.argv.slice(2);
+if (!backupFile || !uinFile)
+  throw new Error('usage: node backup-extract.mjs <backup.zl.zip> <uinFile> <outDir> [--peek|--list|--all]');
+const uin = fs.readFileSync(uinFile, 'utf8').trim();
+const iv = Buffer.from('zie' + uin.slice(0, 13));
+if (iv.length !== 16) throw new Error('UIN too short for the IV — wrong key file?');
+const decipher = crypto.createDecipheriv('aes-256-cbc', crypto.createHash('sha256').update(uin).digest(), iv);
 
-const str = (b) => b.toString("utf8").replace(/\0.*$/s, "");
-const oct = (b) => parseInt(b.toString("latin1").replace(/\0.*$/s, "").trim() || "0", 8);
-let buf = Buffer.alloc(0);
-let cur = null; // entry being read
+/** A NUL-terminated tar string field, decoded as UTF-8. */
+const readCString = (field) => field.toString('utf8').replace(/\0.*$/s, '');
+/** A NUL/space-padded octal tar number field (empty = 0). */
+const readOctal = (field) => parseInt(field.toString('latin1').replace(/\0.*$/s, '').trim() || '0', 8);
+let buffered = Buffer.alloc(0); // decrypted bytes not yet consumed by the tar parser
+let currentEntry = null; // entry being read
 let longName = null; // GNU long-name / pax path for the next header
-let done = false;
-let count = 0;
+let archiveEnded = false;
+let extractedCount = 0;
 
-function header(h) {
-  if (h.every((x) => x === 0)) return null; // end-of-archive block
-  if (h.subarray(257, 262).toString("latin1") !== "ustar") throw new Error("bad tar header — wrong UIN (key)?");
-  let name = str(h.subarray(0, 100));
-  const prefix = str(h.subarray(345, 500));
+/**
+ * Parses one 512-byte ustar header block. Consumes a pending GNU long-name / pax path
+ * (`longName`) as the entry name.
+ *
+ * @param block - The 512-byte header.
+ * @returns `{ name, size, type }` (type is the typeflag char, "0" for regular files), or `null`
+ *   for the all-zero end-of-archive block.
+ * @throws When the block has no "ustar" magic — in practice: decrypted with the wrong UIN.
+ */
+function parseHeader(block) {
+  if (block.every((byte) => byte === 0)) return null; // end-of-archive block
+  if (block.subarray(257, 262).toString('latin1') !== 'ustar') throw new Error('bad tar header — wrong UIN (key)?');
+  let name = readCString(block.subarray(0, 100));
+  const prefix = readCString(block.subarray(345, 500));
   if (prefix) name = `${prefix}/${name}`;
   if (longName) [name, longName] = [longName, null];
-  return { name, size: oct(h.subarray(124, 136)), type: String.fromCharCode(h[156] || 48) };
+  return { name, size: readOctal(block.subarray(124, 136)), type: String.fromCharCode(block[156] || 48) };
 }
 
+/**
+ * Streaming tar parser: appends a chunk of decrypted bytes and consumes as many complete
+ * headers / entry bodies as are available, keeping the remainder buffered for the next call.
+ *
+ * Side effects depend on `flag`: `--peek` prints the first entry and exits the process;
+ * `--list` prints "size<TAB>name" per regular file; otherwise regular files under `/database/`
+ * (or all of them with `--all`) are written below `outDir`, with `:?<>|` in names replaced by "_".
+ * GNU long-name ("L") and pax ("x") entries are collected and applied to the next header.
+ *
+ * @param chunk - Decrypted bytes.
+ */
 function feed(chunk) {
-  buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
-  while (!done) {
-    if (!cur) {
-      if (buf.length < 512) return;
-      const h = header(buf.subarray(0, 512));
-      buf = buf.subarray(512);
-      if (!h) {
-        done = true;
+  buffered = buffered.length ? Buffer.concat([buffered, chunk]) : chunk;
+  while (!archiveEnded) {
+    if (!currentEntry) {
+      if (buffered.length < 512) return;
+      const header = parseHeader(buffered.subarray(0, 512));
+      buffered = buffered.subarray(512);
+      if (!header) {
+        archiveEnded = true;
         return;
       }
-      if (flag === "--peek") {
-        console.log(`key OK — first entry: ${h.name}`);
+      if (flag === '--peek') {
+        console.log(`key OK — first entry: ${header.name}`);
         process.exit(0);
       }
-      cur = { ...h, left: h.size, pad: (512 - (h.size % 512)) % 512, meta: [] };
-      const isFile = h.type === "0";
-      if (isFile && flag === "--list") console.log(`${h.size}\t${h.name}`);
-      if (isFile && outDir && flag !== "--list" && (flag === "--all" || h.name.includes("/database/"))) {
-        const dst = path.join(outDir, h.name.replace(/[:?<>|]/g, "_"));
-        fs.mkdirSync(path.dirname(dst), { recursive: true });
-        cur.out = fs.openSync(dst, "w");
-        count++;
+      currentEntry = { ...header, left: header.size, pad: (512 - (header.size % 512)) % 512, meta: [] };
+      const isFile = header.type === '0';
+      if (isFile && flag === '--list') console.log(`${header.size}\t${header.name}`);
+      if (isFile && outDir && flag !== '--list' && (flag === '--all' || header.name.includes('/database/'))) {
+        const destination = path.join(outDir, header.name.replace(/[:?<>|]/g, '_'));
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        currentEntry.out = fs.openSync(destination, 'w');
+        extractedCount++;
       }
     }
-    const n = Math.min(cur.left, buf.length);
-    if (n > 0) {
-      const part = buf.subarray(0, n);
-      if (cur.type === "L" || cur.type === "x") cur.meta.push(Buffer.from(part));
-      else if (cur.out) fs.writeSync(cur.out, part);
-      buf = buf.subarray(n);
-      cur.left -= n;
+    const bytesToTake = Math.min(currentEntry.left, buffered.length);
+    if (bytesToTake > 0) {
+      const part = buffered.subarray(0, bytesToTake);
+      if (currentEntry.type === 'L' || currentEntry.type === 'x') currentEntry.meta.push(Buffer.from(part));
+      else if (currentEntry.out) fs.writeSync(currentEntry.out, part);
+      buffered = buffered.subarray(bytesToTake);
+      currentEntry.left -= bytesToTake;
     }
-    if (cur.left > 0 || buf.length < cur.pad) return;
-    buf = buf.subarray(cur.pad);
-    if (cur.type === "L") longName = str(Buffer.concat(cur.meta));
-    if (cur.type === "x") longName = /\d+ path=([^\n]*)\n/.exec(Buffer.concat(cur.meta).toString("utf8"))?.[1] ?? null;
-    if (cur.out) fs.closeSync(cur.out);
-    cur = null;
+    if (currentEntry.left > 0 || buffered.length < currentEntry.pad) return;
+    buffered = buffered.subarray(currentEntry.pad);
+    if (currentEntry.type === 'L') longName = readCString(Buffer.concat(currentEntry.meta));
+    if (currentEntry.type === 'x')
+      longName = /\d+ path=([^\n]*)\n/.exec(Buffer.concat(currentEntry.meta).toString('utf8'))?.[1] ?? null;
+    if (currentEntry.out) fs.closeSync(currentEntry.out);
+    currentEntry = null;
   }
 }
 
-const rs = fs.createReadStream(file, { highWaterMark: 1 << 20 });
-rs.on("data", (c) => {
+// Read 1 MiB at a time, decrypt, and feed the tar parser; any parse error aborts with exit code 1
+const backupStream = fs.createReadStream(backupFile, { highWaterMark: 1 << 20 });
+backupStream.on('data', (encryptedChunk) => {
   try {
-    feed(decipher.update(c));
+    feed(decipher.update(encryptedChunk));
   } catch (err) {
     console.error(err.message);
     process.exit(1);
   }
 });
-rs.on("end", () => {
+backupStream.on('end', () => {
   feed(decipher.final());
-  if (flag !== "--list") console.log(`extracted ${count} file(s) into ${outDir}`);
+  if (flag !== '--list') console.log(`extracted ${extractedCount} file(s) into ${outDir}`);
 });

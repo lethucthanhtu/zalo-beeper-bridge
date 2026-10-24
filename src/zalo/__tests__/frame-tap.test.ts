@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { installFrameTap, readHeader, rerouteFrame } from "../frame-tap.ts";
+import { describe, expect, it } from 'vitest';
+import { installFrameTap, readHeader, rerouteFrame } from '../frame-tap.ts';
 
+/** Builds a websocket frame: 4-byte header (version, cmd LE, subCmd) followed by a JSON body. */
 function frame(version: number, cmd: number, subCmd: number, body = '{"data":"x","encrypt":2}'): Buffer {
   const header = Buffer.alloc(4);
   header.writeUInt8(version, 0);
@@ -9,8 +10,8 @@ function frame(version: number, cmd: number, subCmd: number, body = '{"data":"x"
   return Buffer.concat([header, Buffer.from(body)]);
 }
 
-describe("frame tap", () => {
-  it("rewrites E2EE DM pushes (cmd 551) to the DM cmd 501, payload untouched", () => {
+describe('frame tap', () => {
+  it('rewrites E2EE DM pushes (cmd 551) to the DM cmd 501, payload untouched', () => {
     const original = frame(1, 551, 0);
     const routed = rerouteFrame(original);
     expect(readHeader(routed)).toEqual({ version: 1, cmd: 501, subCmd: 0 });
@@ -18,13 +19,13 @@ describe("frame tap", () => {
     expect(readHeader(original)?.cmd).toBe(551); // input not mutated
   });
 
-  it("leaves every other frame alone", () => {
-    for (const f of [frame(1, 501, 0), frame(1, 521, 0), frame(1, 551, 1), frame(2, 551, 0)]) {
-      expect(rerouteFrame(f)).toBe(f);
+  it('leaves every other frame alone', () => {
+    for (const untouchedFrame of [frame(1, 501, 0), frame(1, 521, 0), frame(1, 551, 1), frame(2, 551, 0)]) {
+      expect(rerouteFrame(untouchedFrame)).toBe(untouchedFrame);
     }
   });
 
-  it("wraps the listener websocket once and feeds the rerouted frame to zca-js", () => {
+  it('wraps the listener websocket once and feeds the rerouted frame to zca-js', () => {
     const seen: number[] = [];
     const ws = { onmessage: (event: { data: unknown }) => void seen.push(readHeader(event.data as Buffer)!.cmd) };
     const listener = { ws };

@@ -23,3 +23,6 @@ plans/
 # container deployment inputs (secrets)
 container-config/
 data/
+
+# graphify knowledge graph (rebuild with: graphify update .)
+graphify-out/

@@ -1,0 +1,9 @@
+node_modules/
+graphify-out/
+package-lock.json
+assets/
+plans/
+container-config/
+data/
+*.db
+.claude/skills/

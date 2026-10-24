@@ -4,9 +4,11 @@
 // file and delete it when done. Read-only, one Runtime.evaluate, no network calls.
 //
 // Usage: node scripts/zalo-pc/get-uin.mjs > uin.txt
-import { connectZaloPc, PRELUDE } from "./cdp.mjs";
+import { connectZaloPc, PRELUDE } from './cdp.mjs';
 
 const { evaluate, close } = await connectZaloPc();
+// Runs inside Zalo PC (keep verbatim): probes webpack module "PoHQ", then every loaded module,
+// for an object (or singleton getInstance()) exposing getSessionUIN(); returns the first hit or null.
 const uin = await evaluate(`(()=>{${PRELUDE}
   const r=window.__zbr; const hits=[];
   const look=(o)=>{ if(!o) return; for(const v of Object.values(o)){ try{
@@ -20,7 +22,7 @@ const uin = await evaluate(`(()=>{${PRELUDE}
 })()`);
 close();
 if (!uin) {
-  console.error("session UIN not found — is Zalo PC logged in?");
+  console.error('session UIN not found — is Zalo PC logged in?');
   process.exit(1);
 }
 process.stdout.write(String(uin));

@@ -1,87 +1,97 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { MappingStore } from "../mapping-store.ts";
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MappingStore } from '../mapping-store.ts';
 
-let dir: string;
+let tempDir: string;
 let dbPath: string;
 let store: MappingStore;
 
 beforeEach(() => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-test-"));
-  dbPath = path.join(dir, "test.db");
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-test-'));
+  dbPath = path.join(tempDir, 'test.db');
   store = new MappingStore(dbPath);
 });
 
 afterEach(() => {
   store.close();
-  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-describe("MappingStore", () => {
-  it("persists portals across reopen (restart survival)", () => {
-    store.insertPortal({ thread_id: "t1", thread_type: "user", room_id: "!r1:x", name: "Alice" });
+describe('MappingStore', () => {
+  it('persists portals across reopen (restart survival)', () => {
+    store.insertPortal({ thread_id: 't1', thread_type: 'user', room_id: '!r1:x', name: 'Alice' });
     store.close();
     store = new MappingStore(dbPath);
-    expect(store.getPortalByThread("t1")).toMatchObject({ room_id: "!r1:x", thread_type: "user", name: "Alice" });
-    expect(store.isPortalRoom("!r1:x")).toBe(true);
-    expect(store.isPortalRoom("!other:x")).toBe(false);
+    expect(store.getPortalByThread('t1')).toMatchObject({ room_id: '!r1:x', thread_type: 'user', name: 'Alice' });
+    expect(store.isPortalRoom('!r1:x')).toBe(true);
+    expect(store.isPortalRoom('!other:x')).toBe(false);
   });
 
-  it("rejects duplicate portals for the same thread or room", () => {
-    store.insertPortal({ thread_id: "t1", thread_type: "user", room_id: "!r1:x", name: null });
-    expect(() => store.insertPortal({ thread_id: "t1", thread_type: "user", room_id: "!r2:x", name: null })).toThrow();
-    expect(() => store.insertPortal({ thread_id: "t2", thread_type: "group", room_id: "!r1:x", name: null })).toThrow();
+  it('rejects duplicate portals for the same thread or room', () => {
+    store.insertPortal({ thread_id: 't1', thread_type: 'user', room_id: '!r1:x', name: null });
+    expect(() => store.insertPortal({ thread_id: 't1', thread_type: 'user', room_id: '!r2:x', name: null })).toThrow();
+    expect(() => store.insertPortal({ thread_id: 't2', thread_type: 'group', room_id: '!r1:x', name: null })).toThrow();
   });
 
-  it("dedups messages via recordMessage (INSERT OR IGNORE semantics)", () => {
-    expect(store.recordMessage("m1", "!r1:x", "$e1", "inbound")).toBe(true);
-    expect(store.recordMessage("m1", "!r1:x", "$e2", "inbound")).toBe(false); // replay
-    expect(store.hasMessage("m1")).toBe(true);
-    expect(store.hasMessage("m2")).toBe(false);
+  it('dedups messages via recordMessage (INSERT OR IGNORE semantics)', () => {
+    expect(store.recordMessage('m1', '!r1:x', '$e1', 'inbound')).toBe(true);
+    expect(store.recordMessage('m1', '!r1:x', '$e2', 'inbound')).toBe(false); // replay
+    expect(store.hasMessage('m1')).toBe(true);
+    expect(store.hasMessage('m2')).toBe(false);
   });
 
-  it("backfills event_id and cli_msg_id across the outbound/echo race (either order)", () => {
+  it('backfills event_id and cli_msg_id across the outbound/echo race (either order)', () => {
     // echo first (cli only), then outbound (event only)
-    store.recordMessage("mA", "!r:x", null, "outbound", null, "cliA");
-    store.recordMessage("mA", "!r:x", "$evA", "outbound", null, null);
-    expect(store.getZaloTargetByEventId("$evA")).toEqual({ zaloMsgId: "mA", cliMsgId: "cliA", roomId: "!r:x", direction: "outbound" });
+    store.recordMessage('mA', '!r:x', null, 'outbound', null, 'cliA');
+    store.recordMessage('mA', '!r:x', '$evA', 'outbound', null, null);
+    expect(store.getZaloTargetByEventId('$evA')).toEqual({
+      zaloMsgId: 'mA',
+      cliMsgId: 'cliA',
+      roomId: '!r:x',
+      direction: 'outbound',
+    });
 
     // outbound first (event only), then echo (cli only)
-    store.recordMessage("mB", "!r:x", "$evB", "outbound", null, null);
-    store.recordMessage("mB", "!r:x", null, "outbound", null, "cliB");
-    expect(store.getZaloTargetByEventId("$evB")).toEqual({ zaloMsgId: "mB", cliMsgId: "cliB", roomId: "!r:x", direction: "outbound" });
+    store.recordMessage('mB', '!r:x', '$evB', 'outbound', null, null);
+    store.recordMessage('mB', '!r:x', null, 'outbound', null, 'cliB');
+    expect(store.getZaloTargetByEventId('$evB')).toEqual({
+      zaloMsgId: 'mB',
+      cliMsgId: 'cliB',
+      roomId: '!r:x',
+      direction: 'outbound',
+    });
   });
 
-  it("tracks puppet display-name changes for profile sync", () => {
-    expect(store.upsertPuppet("u1", "@sh-zalo_u1:x", "Old Name")).toBe(true); // new with name
-    expect(store.upsertPuppet("u1", "@sh-zalo_u1:x", "Old Name")).toBe(false); // unchanged
-    expect(store.upsertPuppet("u1", "@sh-zalo_u1:x", "New Name")).toBe(true); // renamed
-    expect(store.upsertPuppet("u2", "@sh-zalo_u2:x", null)).toBe(false); // new without name
+  it('tracks puppet display-name changes for profile sync', () => {
+    expect(store.upsertPuppet('u1', '@sh-zalo_u1:x', 'Old Name')).toBe(true); // new with name
+    expect(store.upsertPuppet('u1', '@sh-zalo_u1:x', 'Old Name')).toBe(false); // unchanged
+    expect(store.upsertPuppet('u1', '@sh-zalo_u1:x', 'New Name')).toBe(true); // renamed
+    expect(store.upsertPuppet('u2', '@sh-zalo_u2:x', null)).toBe(false); // new without name
   });
-  it("repoints a rebuilt thread to its new room, keeping reply/recall data", () => {
-    store.insertPortal({ thread_id: "t1", thread_type: "group", room_id: "!old:x", name: "G" });
-    store.recordMessage("m1", "!old:x", "$a", "inbound", "{\"q\":1}", "c1", "u9", "webchat");
-    store.recordMessage("live-only", "!old:x", "$b", "inbound");
-    store.repointPortal({ thread_id: "t1", thread_type: "group", room_id: "!new:x", name: null }, [
-      { msgId: "m1", eventId: "$a2", direction: "inbound", cliMsgId: "c1", msgType: "1" },
-      { msgId: "m0", eventId: "$z", direction: "outbound", cliMsgId: null, msgType: "1" },
+  it('repoints a rebuilt thread to its new room, keeping reply/recall data', () => {
+    store.insertPortal({ thread_id: 't1', thread_type: 'group', room_id: '!old:x', name: 'G' });
+    store.recordMessage('m1', '!old:x', '$a', 'inbound', '{"q":1}', 'c1', 'u9', 'webchat');
+    store.recordMessage('live-only', '!old:x', '$b', 'inbound');
+    store.repointPortal({ thread_id: 't1', thread_type: 'group', room_id: '!new:x', name: null }, [
+      { msgId: 'm1', eventId: '$a2', direction: 'inbound', cliMsgId: 'c1', msgType: '1' },
+      { msgId: 'm0', eventId: '$z', direction: 'outbound', cliMsgId: null, msgType: '1' },
     ]);
-    expect(store.getPortalByThread("t1")).toMatchObject({ room_id: "!new:x", name: "G" });
-    expect(store.getEventByZaloMsgId("m1")).toEqual({ eventId: "$a2", roomId: "!new:x" });
-    expect(store.getQuoteJsonByEventId("$a2")).toBe("{\"q\":1}");
-    expect(store.getSeenTargetByEventId("$a2")).toMatchObject({ senderId: "u9", msgType: "webchat" });
-    expect(store.getEventByZaloMsgId("m0")).toEqual({ eventId: "$z", roomId: "!new:x" });
-    expect([...store.getRoomMessageIds("!old:x")]).toEqual(["live-only"]);
+    expect(store.getPortalByThread('t1')).toMatchObject({ room_id: '!new:x', name: 'G' });
+    expect(store.getEventByZaloMsgId('m1')).toEqual({ eventId: '$a2', roomId: '!new:x' });
+    expect(store.getQuoteJsonByEventId('$a2')).toBe('{"q":1}');
+    expect(store.getSeenTargetByEventId('$a2')).toMatchObject({ senderId: 'u9', msgType: 'webchat' });
+    expect(store.getEventByZaloMsgId('m0')).toEqual({ eventId: '$z', roomId: '!new:x' });
+    expect([...store.getRoomMessageIds('!old:x')]).toEqual(['live-only']);
   });
-  it("drops mappings of a removed room but never of a live portal", () => {
-    store.insertPortal({ thread_id: "t1", thread_type: "user", room_id: "!live:x", name: null });
-    store.recordMessage("a", "!old:x", "$a", "inbound");
-    store.recordMessage("b", "!live:x", "$b", "inbound");
-    expect(store.deleteRoomMessages("!old:x")).toBe(1);
-    expect(store.hasMessage("a")).toBe(false);
-    expect(() => store.deleteRoomMessages("!live:x")).toThrow();
-    expect(store.hasMessage("b")).toBe(true);
+  it('drops mappings of a removed room but never of a live portal', () => {
+    store.insertPortal({ thread_id: 't1', thread_type: 'user', room_id: '!live:x', name: null });
+    store.recordMessage('a', '!old:x', '$a', 'inbound');
+    store.recordMessage('b', '!live:x', '$b', 'inbound');
+    expect(store.deleteRoomMessages('!old:x')).toBe(1);
+    expect(store.hasMessage('a')).toBe(false);
+    expect(() => store.deleteRoomMessages('!live:x')).toThrow();
+    expect(store.hasMessage('b')).toBe(true);
   });
 });

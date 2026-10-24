@@ -1,60 +1,78 @@
 // Raw zca-js message → ZaloMessage. All zca-js payload quirks live here.
-import type { MediaDescriptor } from "../bridge/media-content.ts";
-import type { RawZaloMessage, ZaloContent, ZaloMessage } from "./types.ts";
+import type { MediaDescriptor } from '../bridge/media-content.ts';
+import type { RawZaloMessage, ZaloContent, ZaloMessage } from './types.ts';
 
 /** chat.photo content shape observed in fixtures */
-interface PhotoContent {
+type PhotoContent = {
   href?: string;
   thumb?: string;
   params?: string; // JSON string: {width, height, hd, ...}
   title?: string; // Zalo puts the photo caption here
   description?: string;
-}
+};
 
-interface StickerContent {
+type StickerContent = {
   id?: number;
   catId?: number;
-}
+};
 
+/**
+ * Maps a raw Zalo `content` field to the bridge's content model, dispatching on msgType:
+ * text, photo, sticker, downloadable media, then link/card types rendered as text
+ * with a link preview. Anything else becomes `unsupported` (the bridge posts a notice).
+ *
+ * @param msgType raw Zalo msgType (e.g. 'webchat', 'chat.photo')
+ * @param content raw content: a string for text, an object for everything else
+ */
 function normalizeContent(msgType: string, content: unknown): ZaloContent {
-  if (msgType === "webchat" && typeof content === "string") {
-    return { kind: "text", text: content };
+  if (msgType === 'webchat' && typeof content === 'string') {
+    return { kind: 'text', text: content };
   }
-  if (msgType === "chat.photo" && typeof content === "object" && content !== null) {
+  if (msgType === 'chat.photo' && typeof content === 'object' && content !== null) {
     const photo = content as PhotoContent;
     if (photo.href) {
       let width: number | undefined;
       let height: number | undefined;
       try {
-        const params = JSON.parse(photo.params ?? "{}") as { width?: number; height?: number };
+        const params = JSON.parse(photo.params ?? '{}') as { width?: number; height?: number };
         width = params.width;
         height = params.height;
       } catch {
         // params malformed — dimensions are optional
       }
-      return { kind: "photo", url: photo.href, thumbUrl: photo.thumb, width, height, caption: photo.title || photo.description || undefined };
+      return {
+        kind: 'photo',
+        url: photo.href,
+        thumbUrl: photo.thumb,
+        width,
+        height,
+        caption: photo.title || photo.description || undefined,
+      };
     }
   }
-  if (msgType === "chat.sticker" && typeof content === "object" && content !== null) {
+  if (msgType === 'chat.sticker' && typeof content === 'object' && content !== null) {
     const sticker = content as StickerContent;
-    if (typeof sticker.id === "number" && typeof sticker.catId === "number") {
-      return { kind: "sticker", id: sticker.id, catId: sticker.catId };
+    if (typeof sticker.id === 'number' && typeof sticker.catId === 'number') {
+      return { kind: 'sticker', id: sticker.id, catId: sticker.catId };
     }
   }
-  if (typeof content === "object" && content !== null) {
+  if (typeof content === 'object' && content !== null) {
     const media = normalizeMedia(msgType, content as AttachmentContent);
-    if (media) return { kind: "media", media };
+    if (media) return { kind: 'media', media };
   }
   // Link/card types (chat.recommended, chat.link, chat.ecard, ...) carry an href +
   // title/description — a text line with the URL plus a Beeper link preview.
-  if (typeof content === "object" && content !== null) {
+  if (typeof content === 'object' && content !== null) {
     const card = content as AttachmentContent;
     if (card.href) {
       const params = parseParams(card.params);
-      const label = card.title || card.description || "";
+      const label = card.title || card.description || '';
       const text = label && !label.includes(card.href) ? `${label}\n${card.href}` : card.href;
-      const title = (typeof params.mediaTitle === "string" && params.mediaTitle) || (card.title && card.title !== card.href ? card.title : "");
-      const description = card.description && card.description !== card.href && card.description !== title ? card.description : "";
+      const title =
+        (typeof params.mediaTitle === 'string' && params.mediaTitle) ||
+        (card.title && card.title !== card.href ? card.title : '');
+      const description =
+        card.description && card.description !== card.href && card.description !== title ? card.description : '';
       const linkPreview = /^https?:\/\//.test(card.href)
         ? {
             url: card.href,
@@ -63,92 +81,143 @@ function normalizeContent(msgType: string, content: unknown): ZaloContent {
             ...(card.thumb && /^https?:\/\//.test(card.thumb) ? { imageUrl: card.thumb } : {}),
           }
         : undefined;
-      return { kind: "text", text, ...(linkPreview ? { linkPreview } : {}) };
+      return { kind: 'text', text, ...(linkPreview ? { linkPreview } : {}) };
     }
   }
-  return { kind: "unsupported", msgType };
+  return { kind: 'unsupported', msgType };
 }
 
-interface AttachmentContent {
+type AttachmentContent = {
   href?: string;
   thumb?: string;
   title?: string;
   description?: string;
   params?: string;
-}
+};
 
+/**
+ * Parses the JSON-encoded `params` string Zalo attaches to media/card content.
+ *
+ * @returns the parsed object, or {} when absent, malformed or not an object
+ */
 function parseParams(params: string | undefined): Record<string, unknown> {
   try {
-    const parsed: unknown = JSON.parse(params ?? "{}");
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+    const parsed: unknown = JSON.parse(params ?? '{}');
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {}; // params malformed — all fields are optional
   }
 }
 
-const positive = (v: unknown): number | undefined => (Number(v) > 0 ? Number(v) : undefined);
+/**
+ * Coerces a loosely-typed Zalo numeric field (number or numeric string) to a number.
+ *
+ * @returns the number when it is > 0, otherwise undefined (missing / zero / garbage)
+ */
+const positive = (value: unknown): number | undefined => (Number(value) > 0 ? Number(value) : undefined);
 
-/** Video / file / voice / GIF / doodle attachments → a downloadable media descriptor. */
-function normalizeMedia(msgType: string, c: AttachmentContent): MediaDescriptor | null {
-  if (!c.href) return null;
-  const p = parseParams(c.params);
+/**
+ * Video / file / voice / GIF / doodle attachments → a downloadable media descriptor.
+ *
+ * @param msgType raw Zalo msgType selecting the media kind
+ * @param attachment raw attachment content (href + JSON params with size/dimensions/duration)
+ * @returns null when there is no href or the msgType is not a known media type
+ */
+function normalizeMedia(msgType: string, attachment: AttachmentContent): MediaDescriptor | null {
+  if (!attachment.href) return null;
+  const params = parseParams(attachment.params);
   switch (msgType) {
-    case "chat.video.msg":
+    case 'chat.video.msg':
       return {
-        kind: "video",
-        urls: [c.href],
-        filename: "zalo-video.mp4",
-        caption: c.title || undefined,
-        width: positive(p.video_width),
-        height: positive(p.video_height),
-        durationMs: positive(p.duration),
-        size: positive(p.fileSize),
+        kind: 'video',
+        urls: [attachment.href],
+        filename: 'zalo-video.mp4',
+        caption: attachment.title || undefined,
+        width: positive(params.video_width),
+        height: positive(params.video_height),
+        durationMs: positive(params.duration),
+        size: positive(params.fileSize),
       };
-    case "share.file":
-      return { kind: "file", urls: [c.href], filename: c.title || "zalo-file", size: positive(p.fileSize) };
-    case "chat.voice":
-      return { kind: "audio", urls: [c.href], filename: "zalo-voice.m4a", durationMs: positive(p.duration), size: positive(p.fileSize) };
-    case "chat.gif":
-      return { kind: "image", urls: [c.href, ...(c.thumb ? [c.thumb] : [])], filename: "zalo.gif", width: positive(p.width), height: positive(p.height) };
-    case "chat.doodle":
-      return { kind: "image", urls: [c.href], filename: "zalo-doodle.png", width: positive(p.width), height: positive(p.height) };
+    case 'share.file':
+      return {
+        kind: 'file',
+        urls: [attachment.href],
+        filename: attachment.title || 'zalo-file',
+        size: positive(params.fileSize),
+      };
+    case 'chat.voice':
+      return {
+        kind: 'audio',
+        urls: [attachment.href],
+        filename: 'zalo-voice.m4a',
+        durationMs: positive(params.duration),
+        size: positive(params.fileSize),
+      };
+    case 'chat.gif':
+      return {
+        kind: 'image',
+        urls: [attachment.href, ...(attachment.thumb ? [attachment.thumb] : [])],
+        filename: 'zalo.gif',
+        width: positive(params.width),
+        height: positive(params.height),
+      };
+    case 'chat.doodle':
+      return {
+        kind: 'image',
+        urls: [attachment.href],
+        filename: 'zalo-doodle.png',
+        width: positive(params.width),
+        height: positive(params.height),
+      };
     default:
       return null;
   }
 }
 
-/** Returns null for events that carry no bridgeable message (missing ids). */
+/**
+ * Converts a raw zca-js listener/history message into the bridge's ZaloMessage:
+ * stringifies ids, derives the thread type, normalizes content, and keeps the raw
+ * fields needed to quote the message later.
+ *
+ * @returns null for events that carry no bridgeable message (missing ids)
+ */
 export function normalizeZaloMessage(raw: RawZaloMessage): ZaloMessage | null {
-  const d = raw.data;
+  const messageData = raw.data;
   // uidFrom is the Phase 4 puppet key — never let "undefined" become a ghost id
-  if (!d?.msgId || !raw.threadId || !d.uidFrom) return null;
+  if (!messageData?.msgId || !raw.threadId || !messageData.uidFrom) return null;
   // E2EE 1-1 chats (Signal protocol): the content is ciphertext this web session cannot
   // decrypt — never post it as text, surface a notice instead
-  const content: ZaloContent = d.e2ee ? { kind: "unsupported", msgType: "e2ee" } : normalizeContent(d.msgType, d.content);
+  const content: ZaloContent = messageData.e2ee
+    ? { kind: 'unsupported', msgType: 'e2ee' }
+    : normalizeContent(messageData.msgType, messageData.content);
   return {
-    msgId: String(d.msgId),
+    msgId: String(messageData.msgId),
     threadId: raw.threadId,
-    threadType: raw.type === 1 ? "group" : "user",
-    senderId: String(d.uidFrom),
-    senderName: d.dName || undefined,
-    timestamp: Number(d.ts) || Date.now(),
+    threadType: raw.type === 1 ? 'group' : 'user',
+    senderId: String(messageData.uidFrom),
+    senderName: messageData.dName || undefined,
+    timestamp: Number(messageData.ts) || Date.now(),
     isSelf: raw.isSelf === true,
     content,
-    cliMsgId: d.cliMsgId != null ? String(d.cliMsgId) : undefined,
-    rawMsgType: d.msgType,
+    cliMsgId: messageData.cliMsgId != null ? String(messageData.cliMsgId) : undefined,
+    rawMsgType: messageData.msgType,
     // Any message can be quoted later (Matrix reply → Zalo quote): keep the raw content
     quotable: {
-      content: d.content,
-      msgType: d.msgType,
-      propertyExt: d.propertyExt ?? null,
-      uidFrom: String(d.uidFrom),
-      msgId: String(d.msgId),
-      cliMsgId: String(d.cliMsgId ?? ""),
-      ts: String(d.ts),
-      ttl: d.ttl ?? 0,
+      content: messageData.content,
+      msgType: messageData.msgType,
+      propertyExt: messageData.propertyExt ?? null,
+      uidFrom: String(messageData.uidFrom),
+      msgId: String(messageData.msgId),
+      cliMsgId: String(messageData.cliMsgId ?? ''),
+      ts: String(messageData.ts),
+      ttl: messageData.ttl ?? 0,
     },
     // Zalo quote → the quoted message's global msgId (Matrix reply mapping)
-    replyToMsgId: d.quote?.globalMsgId != null ? String(d.quote.globalMsgId) : undefined,
-    mentions: d.mentions?.map((m) => ({ uid: String(m.uid), pos: m.pos, len: m.len })),
+    replyToMsgId: messageData.quote?.globalMsgId != null ? String(messageData.quote.globalMsgId) : undefined,
+    mentions: messageData.mentions?.map((mention) => ({
+      uid: String(mention.uid),
+      pos: mention.pos,
+      len: mention.len,
+    })),
   };
 }

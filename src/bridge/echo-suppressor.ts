@@ -6,67 +6,88 @@
 // the echo, so we match on (threadId, content) within a short TTL window.
 const TTL_MS = 15_000;
 
-interface PendingEcho {
+/** One armed text echo: the exact text we sent and when the guard lapses. */
+type PendingEcho = {
   text: string;
   expiresAt: number;
-}
+};
 
+/**
+ * In-memory, per-thread registry of messages the bridge just sent to Zalo, so the
+ * selfListen copy of each send is swallowed exactly once instead of re-posted.
+ * Text sends are matched by exact text; image sends by a per-thread time window.
+ * Every entry expires after TTL_MS so a stale guard cannot hide a real message.
+ */
 export class EchoSuppressor {
   private readonly pending = new Map<string, PendingEcho[]>();
   // Outbound images have neither a pre-send msgId nor a known CDN url, so guard by
   // a per-thread "image just sent" window: threadId → array of send expiries
   private readonly pendingImages = new Map<string, number[]>();
 
-  /** Arm BEFORE sending an image (we don't yet know its msgId or CDN url). */
+  /**
+   * Arm BEFORE sending an image (we don't yet know its msgId or CDN url).
+   * Adds one expiry marker for the thread and prunes already-expired ones.
+   */
   expectImage(threadId: string): void {
-    const list = (this.pendingImages.get(threadId) ?? []).filter((e) => e > Date.now());
-    list.push(Date.now() + TTL_MS);
-    this.pendingImages.set(threadId, list);
+    const expiries = (this.pendingImages.get(threadId) ?? []).filter((expiresAt) => expiresAt > Date.now());
+    expiries.push(Date.now() + TTL_MS);
+    this.pendingImages.set(threadId, expiries);
   }
 
-  /** True (consuming one marker) when a self photo in this thread is our own echo. */
+  /**
+   * True (consuming the first live marker) when a self photo in this thread is our own echo.
+   * Deletes the thread's entry when no live marker is found or none is left after consuming.
+   */
   consumeImage(threadId: string): boolean {
-    const list = this.pendingImages.get(threadId);
-    if (!list) return false;
+    const expiries = this.pendingImages.get(threadId);
+    if (!expiries) return false;
     const now = Date.now();
-    const idx = list.findIndex((e) => e > now);
-    if (idx === -1) {
+    const liveIndex = expiries.findIndex((expiresAt) => expiresAt > now);
+    if (liveIndex === -1) {
       this.pendingImages.delete(threadId);
       return false;
     }
-    list.splice(idx, 1);
-    if (list.length) this.pendingImages.set(threadId, list);
+    expiries.splice(liveIndex, 1);
+    if (expiries.length) this.pendingImages.set(threadId, expiries);
     else this.pendingImages.delete(threadId);
     return true;
   }
 
-  /** Call right before sending to Zalo. */
+  /**
+   * Call right before sending to Zalo: arms one guard for `text` in this thread.
+   * Identical sends arm one guard each, so each of their echoes is swallowed once.
+   */
   expect(threadId: string, text: string): void {
-    const list = this.pending.get(threadId) ?? [];
-    list.push({ text, expiresAt: Date.now() + TTL_MS });
-    this.pending.set(threadId, list);
+    const echoes = this.pending.get(threadId) ?? [];
+    echoes.push({ text, expiresAt: Date.now() + TTL_MS });
+    this.pending.set(threadId, echoes);
   }
 
-  /** Removes one pending entry — call when a send FAILED so a real phone-typed
-   * message with identical text isn't wrongly swallowed. */
+  /**
+   * Removes one pending entry — call when a send FAILED so a real phone-typed
+   * message with identical text isn't wrongly swallowed.
+   */
   cancel(threadId: string, text: string): void {
-    const list = this.pending.get(threadId);
-    if (!list) return;
-    const idx = list.findIndex((e) => e.text === text);
-    if (idx !== -1) list.splice(idx, 1);
-    if (!list.length) this.pending.delete(threadId);
+    const echoes = this.pending.get(threadId);
+    if (!echoes) return;
+    const matchIndex = echoes.findIndex((echo) => echo.text === text);
+    if (matchIndex !== -1) echoes.splice(matchIndex, 1);
+    if (!echoes.length) this.pending.delete(threadId);
   }
 
-  /** Returns true (and consumes the entry) when this self-message is our own echo. */
+  /**
+   * Returns true (and consumes the entry) when this self-message is our own echo.
+   * Also prunes the thread's expired entries as a side effect.
+   */
   consume(threadId: string, text: string): boolean {
-    const list = this.pending.get(threadId);
-    if (!list) return false;
+    const echoes = this.pending.get(threadId);
+    if (!echoes) return false;
     const now = Date.now();
-    const idx = list.findIndex((e) => e.text === text && e.expiresAt > now);
+    const matchIndex = echoes.findIndex((echo) => echo.text === text && echo.expiresAt > now);
     // Drop expired entries opportunistically
-    const fresh = list.filter((e) => e.expiresAt > now && e !== list[idx]);
+    const fresh = echoes.filter((echo) => echo.expiresAt > now && echo !== echoes[matchIndex]);
     if (fresh.length) this.pending.set(threadId, fresh);
     else this.pending.delete(threadId);
-    return idx !== -1;
+    return matchIndex !== -1;
   }
 }

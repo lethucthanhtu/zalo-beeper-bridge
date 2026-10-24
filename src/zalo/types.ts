@@ -1,18 +1,18 @@
 // Normalized Zalo event model — the only shapes the bridge layer sees.
 // Derived from live fixtures captured in Phase 1 (plans/.../reports/phase-01-spike-findings.md).
-import type { LinkPreview, MediaDescriptor } from "../bridge/media-content.ts";
+import type { LinkPreview, MediaDescriptor } from '../bridge/media-content.ts';
 
-export type ZaloThreadType = "user" | "group";
+export type ZaloThreadType = 'user' | 'group';
 
 export type ZaloContent =
-  | { kind: "text"; text: string; linkPreview?: LinkPreview }
-  | { kind: "photo"; url: string; thumbUrl?: string; width?: number; height?: number; caption?: string }
-  | { kind: "sticker"; id: number; catId: number }
+  | { kind: 'text'; text: string; linkPreview?: LinkPreview }
+  | { kind: 'photo'; url: string; thumbUrl?: string; width?: number; height?: number; caption?: string }
+  | { kind: 'sticker'; id: number; catId: number }
   /** video / file / voice / GIF / doodle — rendered by bridge/media-content.ts */
-  | { kind: "media"; media: MediaDescriptor }
-  | { kind: "unsupported"; msgType: string };
+  | { kind: 'media'; media: MediaDescriptor }
+  | { kind: 'unsupported'; msgType: string };
 
-export interface ZaloMessage {
+export type ZaloMessage = {
   msgId: string;
   threadId: string;
   threadType: ZaloThreadType;
@@ -34,16 +34,16 @@ export interface ZaloMessage {
   replyToMsgId?: string;
   /** @mentions in a group message (uid + position/length in the text) */
   mentions?: ZaloMention[];
-}
+};
 
-export interface ZaloMention {
+export type ZaloMention = {
   uid: string;
   pos: number;
   len: number;
-}
+};
 
 /** A contact reacted to a message. */
-export interface ZaloReactionEvent {
+export type ZaloReactionEvent = {
   threadId: string;
   threadType: ZaloThreadType;
   senderId: string;
@@ -54,10 +54,10 @@ export interface ZaloReactionEvent {
   targetMsgId: string;
   /** Zalo reaction icon code ("/-heart", ":>", ... ; "" = removed) */
   icon: string;
-}
+};
 
 /** Subset of TMessage that zca-js sendMessage accepts as `quote`. */
-export interface ZaloQuotePayload {
+export type ZaloQuotePayload = {
   content: unknown; // string for text, object for media
   msgType: string;
   propertyExt: unknown;
@@ -66,26 +66,26 @@ export interface ZaloQuotePayload {
   cliMsgId: string;
   ts: string;
   ttl: number;
-}
+};
 
 /** Read-receipt event: someone saw messages in a thread. */
-export interface ZaloSeenEvent {
+export type ZaloSeenEvent = {
   threadId: string;
   threadType: ZaloThreadType;
   msgId: string;
   /** group only: uids that saw the message; empty for DMs (the peer saw it) */
   seenUids: string[];
-}
+};
 
 /** Typing indicator from a contact. */
-export interface ZaloTypingEvent {
+export type ZaloTypingEvent = {
   threadId: string;
   threadType: ZaloThreadType;
   uid: string;
-}
+};
 
 /** Raw zca-js listener "message" event shape (subset we rely on). */
-export interface RawZaloMessage {
+export type RawZaloMessage = {
   type: number; // 0=User, 1=Group (zca-js ThreadType)
   threadId: string;
   isSelf: boolean;
@@ -104,4 +104,4 @@ export interface RawZaloMessage {
     /** present on end-to-end-encrypted 1-1 pushes (ws cmd 551): content is Signal ciphertext */
     e2ee?: unknown;
   };
-}
+};

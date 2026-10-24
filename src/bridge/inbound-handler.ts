@@ -1,19 +1,20 @@
 // Inbound pipeline: ZaloMessage → dedup → puppet → portal → Matrix event.
 // Per-thread promise chains preserve message order (appservice-style concurrency
 // would otherwise interleave async sends within one conversation).
-import type { Bridge } from "matrix-appservice-bridge";
-import type { EchoSuppressor } from "./echo-suppressor.ts";
-import { buildLinkPreview, buildMediaEvent, fetchFirstMedia, LARGE_MEDIA_MAX_BYTES } from "./media-content.ts";
-import { bridgeInboundPhoto, bridgeInboundSticker } from "./media-handler.ts";
-import { buildInboundMentions } from "./mentions.ts";
-import { SELF_BRIDGE_MARKER } from "./outbound-handler.ts";
-import type { MappingStore } from "./mapping-store.ts";
-import { ownerIntent } from "./owner-intent.ts";
-import type { PortalManager } from "./portal-manager.ts";
-import type { PuppetRegistry } from "./puppet-registry.ts";
-import type { ZaloMessage } from "../zalo/types.ts";
+import type { Bridge } from 'matrix-appservice-bridge';
+import type { EchoSuppressor } from './echo-suppressor.ts';
+import { buildLinkPreview, buildMediaEvent, fetchFirstMedia, LARGE_MEDIA_MAX_BYTES } from './media-content.ts';
+import { bridgeInboundPhoto, bridgeInboundSticker } from './media-handler.ts';
+import { buildInboundMentions } from './mentions.ts';
+import { SELF_BRIDGE_MARKER } from './outbound-handler.ts';
+import type { MappingStore } from './mapping-store.ts';
+import { ownerIntent } from './owner-intent.ts';
+import type { PortalManager } from './portal-manager.ts';
+import type { PuppetRegistry } from './puppet-registry.ts';
+import type { ZaloMessage } from '../zalo/types.ts';
 
-export interface InboundHandlerDeps {
+/** Collaborators and settings the inbound pipeline needs. */
+export type InboundHandlerDeps = {
   bridge: Bridge;
   store: MappingStore;
   puppets: PuppetRegistry;
@@ -28,20 +29,31 @@ export interface InboundHandlerDeps {
   /** shared with OutboundHandler: event_ids the bridge posted as the owner
    * (own phone messages) so they are never sent back to Zalo (anti-loop). */
   bridgedEventIds: Set<string>;
-}
+};
 
+/**
+ * Bridges Zalo messages into Matrix portal rooms: drops duplicates and echoes of
+ * our own sends, provisions the portal and sender ghost, posts the content (text,
+ * photo, sticker, media or a notice) and records the msgId ↔ event_id mapping.
+ */
 export class InboundHandler {
   private readonly deps: InboundHandlerDeps;
+  /** threadId → tail of that thread's processing chain (removed once it drains) */
   private readonly threadQueues = new Map<string, Promise<void>>();
 
+  /** @param deps Shared bridge collaborators (see InboundHandlerDeps). */
   constructor(deps: InboundHandlerDeps) {
     this.deps = deps;
   }
 
-  /** Entry point — serializes per thread, never throws (errors are logged). */
+  /**
+   * Entry point — serializes per thread, never throws (errors are logged).
+   * Queues the message behind any message of the same thread still being
+   * processed and returns immediately.
+   */
   handle(msg: ZaloMessage): void {
-    const prior = this.threadQueues.get(msg.threadId) ?? Promise.resolve();
-    const next = prior
+    const previous = this.threadQueues.get(msg.threadId) ?? Promise.resolve();
+    const next = previous
       .then(() => this.process(msg))
       .catch((err) => console.error(`[bridge] inbound ${msg.msgId} failed:`, err instanceof Error ? err.message : err))
       .finally(() => {
@@ -50,6 +62,15 @@ export class InboundHandler {
     this.threadQueues.set(msg.threadId, next);
   }
 
+  /**
+   * Bridges one Zalo message (called in per-thread order by `handle`).
+   * Own echoes only backfill quote/cliMsgId on the existing row; duplicates are
+   * dropped. Otherwise ensures the portal (and, for groups, the sender ghost in
+   * the room), posts the content as the sender ghost or — for the owner's own
+   * phone messages — as the owner (tagged with SELF_BRIDGE_MARKER and added to
+   * `bridgedEventIds`), then records the message mapping.
+   * @throws On portal/ghost provisioning or Matrix send failures (logged by `handle`).
+   */
   private async process(msg: ZaloMessage): Promise<void> {
     // Echo of our OWN Beeper-sent message (outbound already recorded its msgId first,
     // so hasMessage is true before the echo path below can run): backfill the quote
@@ -58,9 +79,9 @@ export class InboundHandler {
     if (msg.isSelf && this.deps.store.hasMessage(msg.msgId)) {
       this.deps.store.recordMessage(
         msg.msgId,
-        this.deps.store.getPortalByThread(msg.threadId)?.room_id ?? "",
+        this.deps.store.getPortalByThread(msg.threadId)?.room_id ?? '',
         null,
-        "outbound",
+        'outbound',
         msg.quotable ? JSON.stringify(msg.quotable) : null,
         msg.cliMsgId ?? null,
       );
@@ -69,16 +90,17 @@ export class InboundHandler {
     if (this.deps.store.hasMessage(msg.msgId)) return; // duplicate listener event
 
     // Our own send echoed back by selfListen → already visible in Beeper, don't repost
-    const isTextEcho = msg.isSelf && msg.content.kind === "text" && this.deps.echo.consume(msg.threadId, msg.content.text);
-    const isMediaEcho = msg.isSelf && msg.content.kind === "photo" && this.deps.echo.consumeImage(msg.threadId);
+    const isTextEcho =
+      msg.isSelf && msg.content.kind === 'text' && this.deps.echo.consume(msg.threadId, msg.content.text);
+    const isMediaEcho = msg.isSelf && msg.content.kind === 'photo' && this.deps.echo.consumeImage(msg.threadId);
     if (isTextEcho || isMediaEcho) {
       // The echo carries the cliMsgId our send response lacked (needed for recall)
       // and a full quotable payload (needed to reply to our own Beeper-sent message)
       this.deps.store.recordMessage(
         msg.msgId,
-        this.deps.store.getPortalByThread(msg.threadId)?.room_id ?? "",
+        this.deps.store.getPortalByThread(msg.threadId)?.room_id ?? '',
         null,
-        "outbound",
+        'outbound',
         msg.quotable ? JSON.stringify(msg.quotable) : null,
         msg.cliMsgId ?? null,
       );
@@ -98,95 +120,125 @@ export class InboundHandler {
     // Extra content fields merged into every post. For our own (double-puppeted)
     // messages this marks them so OutboundHandler never loops them back to Zalo.
     // Zalo quote → Matrix reply: map the quoted msgId to its bridged Matrix event.
-    const extra: Record<string, unknown> = {};
-    if (msg.isSelf) extra[SELF_BRIDGE_MARKER] = true;
+    const extraContent: Record<string, unknown> = {};
+    if (msg.isSelf) extraContent[SELF_BRIDGE_MARKER] = true;
     if (msg.replyToMsgId) {
       const target = this.deps.store.getEventByZaloMsgId(msg.replyToMsgId);
-      if (target?.eventId) extra["m.relates_to"] = { "m.in_reply_to": { event_id: target.eventId } };
+      if (target?.eventId) extraContent['m.relates_to'] = { 'm.in_reply_to': { event_id: target.eventId } };
     }
 
     let eventId: string | null = null;
     switch (msg.content.kind) {
-      case "text": {
-        const textContent: Record<string, unknown> = { msgtype: "m.text", body: msg.content.text, ...extra };
+      case 'text': {
+        const textContent: Record<string, unknown> = { msgtype: 'm.text', body: msg.content.text, ...extraContent };
         // @mentions → matrix.to pills + m.mentions so Beeper renders and notifies
         if (msg.mentions?.length) {
           const ownId = this.deps.getOwnZaloId();
           const { formattedBody, userIds } = buildInboundMentions(msg.content.text, msg.mentions, (uid) =>
             uid === ownId ? this.deps.ownerUserId : this.deps.puppets.mxidFor(uid),
           );
-          textContent.format = "org.matrix.custom.html";
+          textContent.format = 'org.matrix.custom.html';
           textContent.formatted_body = formattedBody;
-          textContent["m.mentions"] = { user_ids: userIds };
+          textContent['m.mentions'] = { user_ids: userIds };
         }
         const preview = msg.content.linkPreview;
         if (preview) {
-          const upload = (buffer: Buffer, o: { type: string; name: string }) => intent.uploadContent(buffer, o);
+          /** Uploads the preview image as the posting intent; returns the mxc:// URI. */
+          const upload = (buffer: Buffer, uploadOptions: { type: string; name: string }) =>
+            intent.uploadContent(buffer, uploadOptions);
           // A failed thumbnail upload still leaves a text-only preview
-          textContent["com.beeper.linkpreviews"] = [
-            await buildLinkPreview(upload, preview, this.deps.mediaMaxBytes).catch(() => ({ matched_url: preview.url, "og:url": preview.url })),
+          textContent['com.beeper.linkpreviews'] = [
+            await buildLinkPreview(upload, preview, this.deps.mediaMaxBytes).catch(() => ({
+              matched_url: preview.url,
+              'og:url': preview.url,
+            })),
           ];
         }
-        const r = await intent.sendMessage(portal.room_id, textContent);
-        eventId = r.event_id;
+        const sent = await intent.sendMessage(portal.room_id, textContent);
+        eventId = sent.event_id;
         break;
       }
-      case "photo": {
+      case 'photo': {
         try {
-          const r = await bridgeInboundPhoto(intent, portal.room_id, msg.content, this.deps.mediaMaxBytes, extra);
-          eventId = r.eventId;
+          const bridged = await bridgeInboundPhoto(
+            intent,
+            portal.room_id,
+            msg.content,
+            this.deps.mediaMaxBytes,
+            extraContent,
+          );
+          eventId = bridged.eventId;
         } catch (err) {
-          const r = await intent.sendMessage(portal.room_id, {
-            msgtype: "m.notice",
+          const sent = await intent.sendMessage(portal.room_id, {
+            msgtype: 'm.notice',
             body: `[Zalo photo could not be bridged: ${(err as Error).message}]`,
-            ...extra,
+            ...extraContent,
           });
-          eventId = r.event_id;
+          eventId = sent.event_id;
         }
         break;
       }
-      case "sticker": {
+      case 'sticker': {
         try {
           // Still-image URL is only the fallback: animated stickers are built from the sprite
-          const url = await this.deps.resolveStickerUrl(msg.content.id).catch(() => null);
-          const r = await bridgeInboundSticker(intent, portal.room_id, msg.content.id, url, this.deps.mediaMaxBytes, extra);
-          eventId = r.eventId;
+          const stillImageUrl = await this.deps.resolveStickerUrl(msg.content.id).catch(() => null);
+          const bridged = await bridgeInboundSticker(
+            intent,
+            portal.room_id,
+            msg.content.id,
+            stillImageUrl,
+            this.deps.mediaMaxBytes,
+            extraContent,
+          );
+          eventId = bridged.eventId;
         } catch {
-          const r = await intent.sendMessage(portal.room_id, { msgtype: "m.notice", body: "[Zalo sticker]", ...extra });
-          eventId = r.event_id;
+          const sent = await intent.sendMessage(portal.room_id, {
+            msgtype: 'm.notice',
+            body: '[Zalo sticker]',
+            ...extraContent,
+          });
+          eventId = sent.event_id;
         }
         break;
       }
-      case "media": {
+      case 'media': {
         const media = msg.content.media;
         // Videos and documents are routinely bigger than the photo cap
-        const cap = media.kind === "video" || media.kind === "file" ? Math.max(this.deps.mediaMaxBytes, LARGE_MEDIA_MAX_BYTES) : this.deps.mediaMaxBytes;
-        const bytes = await fetchFirstMedia(media.urls, cap);
+        const maxBytes =
+          media.kind === 'video' || media.kind === 'file'
+            ? Math.max(this.deps.mediaMaxBytes, LARGE_MEDIA_MAX_BYTES)
+            : this.deps.mediaMaxBytes;
+        const bytes = await fetchFirstMedia(media.urls, maxBytes);
         if (bytes) {
-          const upload = (buffer: Buffer, o: { type: string; name: string }) => intent.uploadContent(buffer, o);
-          const built = await buildMediaEvent(upload, media, bytes);
-          const r = await intent.sendEvent(portal.room_id, built.type, { ...built.content, ...extra });
-          eventId = r.event_id;
-        } else {
-          const r = await intent.sendMessage(portal.room_id, {
-            msgtype: "m.notice",
-            body: `[Zalo ${media.kind} could not be bridged${media.filename ? `: ${media.filename}` : ""}]\n${media.urls[0] ?? ""}`,
-            ...extra,
+          /** Uploads the media bytes as the posting intent; returns the mxc:// URI. */
+          const upload = (buffer: Buffer, uploadOptions: { type: string; name: string }) =>
+            intent.uploadContent(buffer, uploadOptions);
+          const mediaEvent = await buildMediaEvent(upload, media, bytes);
+          const sent = await intent.sendEvent(portal.room_id, mediaEvent.type, {
+            ...mediaEvent.content,
+            ...extraContent,
           });
-          eventId = r.event_id;
+          eventId = sent.event_id;
+        } else {
+          const sent = await intent.sendMessage(portal.room_id, {
+            msgtype: 'm.notice',
+            body: `[Zalo ${media.kind} could not be bridged${media.filename ? `: ${media.filename}` : ''}]\n${media.urls[0] ?? ''}`,
+            ...extraContent,
+          });
+          eventId = sent.event_id;
         }
         break;
       }
-      case "unsupported": {
-        const r = await intent.sendMessage(portal.room_id, {
-          msgtype: "m.notice",
+      case 'unsupported': {
+        const sent = await intent.sendMessage(portal.room_id, {
+          msgtype: 'm.notice',
           body:
-            msg.content.msgType === "e2ee"
-              ? "🔒 Tin nhắn mã hoá đầu cuối của Zalo — bridge không giải mã được. Mở Zalo trên điện thoại để đọc. (End-to-end encrypted Zalo message — open Zalo on your phone to read it.)"
+            msg.content.msgType === 'e2ee'
+              ? '🔒 Tin nhắn mã hoá đầu cuối của Zalo — bridge không giải mã được. Mở Zalo trên điện thoại để đọc. (End-to-end encrypted Zalo message — open Zalo on your phone to read it.)'
               : `[Zalo message type not supported by bridge: ${msg.content.msgType}]`,
-          ...extra,
+          ...extraContent,
         });
-        eventId = r.event_id;
+        eventId = sent.event_id;
         break;
       }
     }
@@ -197,7 +249,7 @@ export class InboundHandler {
       msg.msgId,
       portal.room_id,
       eventId,
-      "inbound",
+      'inbound',
       msg.quotable ? JSON.stringify(msg.quotable) : null,
       msg.cliMsgId ?? null,
       msg.senderId,
@@ -205,9 +257,15 @@ export class InboundHandler {
     );
   }
 
+  /**
+   * Intent of the sender's ghost: registers/profile-syncs the ghost and, in group
+   * portals, makes sure it has joined the room (DM rooms are created by the ghost).
+   * @param msg Incoming message (sender id/name, thread type).
+   * @param roomId Portal room the message will be posted to.
+   */
   private async intentForSender(msg: ZaloMessage, roomId: string) {
     const intent = await this.deps.puppets.ensurePuppet(msg.senderId, msg.senderName);
-    if (msg.threadType === "group") {
+    if (msg.threadType === 'group') {
       await this.deps.portals.ensureGhostInRoom(msg.senderId, roomId, msg.senderName);
     }
     return intent;

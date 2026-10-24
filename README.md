@@ -8,24 +8,24 @@ It also ships a **history importer** that moves your full Zalo history (from Zal
 
 ## Features
 
-| Area | Zalo → Beeper | Beeper → Zalo |
-|------|:---:|:---:|
-| Text (DM + group) | ✅ | ✅ |
-| @mentions | ✅ (pills) | ✅ |
-| Replies / quotes | ✅ | ✅ |
-| Photos | ✅ | ✅ |
-| Stickers | ✅ animated (`m.sticker`, WebP built from Zalo's sprite) | — |
-| GIFs | ✅ | — |
-| Videos | ✅ (`m.video`) | ✅ |
-| Files | ✅ (`m.file`) | ✅ |
-| Voice messages | ✅ (`m.audio` voice note) | ✅ (sent as a file) |
-| Link cards | ✅ text + Beeper link preview | — |
-| Reactions | ✅ | ✅ |
-| Message recall | — | ✅ |
-| Read receipts | ✅ | ✅ |
-| Typing indicators | ✅ | disabled (handler kept, see `src/index.ts`) |
-| Own messages sent from the phone | ✅ (double-puppeted) | n/a |
-| End-to-end encrypted Zalo chats | notice only (cannot be decrypted) | — |
+| Area                             |                      Zalo → Beeper                       |                Beeper → Zalo                |
+| -------------------------------- | :------------------------------------------------------: | :-----------------------------------------: |
+| Text (DM + group)                |                            ✅                            |                     ✅                      |
+| @mentions                        |                        ✅ (pills)                        |                     ✅                      |
+| Replies / quotes                 |                            ✅                            |                     ✅                      |
+| Photos                           |                            ✅                            |                     ✅                      |
+| Stickers                         | ✅ animated (`m.sticker`, WebP built from Zalo's sprite) |                      —                      |
+| GIFs                             |                            ✅                            |                      —                      |
+| Videos                           |                      ✅ (`m.video`)                      |                     ✅                      |
+| Files                            |                      ✅ (`m.file`)                       |                     ✅                      |
+| Voice messages                   |                ✅ (`m.audio` voice note)                 |             ✅ (sent as a file)             |
+| Link cards                       |              ✅ text + Beeper link preview               |                      —                      |
+| Reactions                        |                            ✅                            |                     ✅                      |
+| Message recall                   |                            —                             |                     ✅                      |
+| Read receipts                    |                            ✅                            |                     ✅                      |
+| Typing indicators                |                            ✅                            | disabled (handler kept, see `src/index.ts`) |
+| Own messages sent from the phone |                   ✅ (double-puppeted)                   |                     n/a                     |
+| End-to-end encrypted Zalo chats  |            notice only (cannot be decrypted)             |                      —                      |
 
 Live videos / files / voice / GIFs and link previews share their rendering with the history importer, where it was verified on real chats; for live messages they are covered by unit tests of the payload parsing.
 
@@ -77,13 +77,13 @@ matrix:
   domain: beeper.local
   registrationPath: registration.yaml
   port: 29350
-  owner: "@<your-beeper-username>:beeper.com"
+  owner: '@<your-beeper-username>:beeper.com'
 zalo:
-  credsPath: zalo-creds.session.json     # encrypted at rest; never commit
-  messagesPerMinute: 8                    # conservative pacing to protect the account
+  credsPath: zalo-creds.session.json # encrypted at rest; never commit
+  messagesPerMinute: 8 # conservative pacing to protect the account
 bridge:
   dbPath: bridge.db
-  mediaMaxBytes: 10485760                 # photos / stickers / previews; videos & files allow up to 100 MB
+  mediaMaxBytes: 10485760 # photos / stickers / previews; videos & files allow up to 100 MB
 logging:
   level: info
 ```
@@ -125,13 +125,13 @@ Scan the QR image it posts with the Zalo app on your phone and confirm. Once you
 
 Send these to the bridge bot in its management chat (owner only):
 
-| Command | Action |
-|---------|--------|
-| `ping` | health check (`pong` + uptime) |
-| `login` | start QR login to Zalo |
-| `logout` | log out and clear saved credentials |
-| `status` | login state, listener state, uptime |
-| `sync` | create rooms for pinned chats + every group, fill empty rooms with the history Zalo allows this session (none from before login) |
+| Command  | Action                                                                                                                           |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `ping`   | health check (`pong` + uptime)                                                                                                   |
+| `login`  | start QR login to Zalo                                                                                                           |
+| `logout` | log out and clear saved credentials                                                                                              |
+| `status` | login state, listener state, uptime                                                                                              |
+| `sync`   | create rooms for pinned chats + every group, fill empty rooms with the history Zalo allows this session (none from before login) |
 
 ## Importing Zalo history
 
@@ -141,16 +141,16 @@ Zalo Web (and therefore the live bridge) cannot fetch messages from before the s
 
 Imported messages are rendered exactly like live ones (`src/bridge/media-content.ts` is shared):
 
-| Zalo message | In Beeper |
-|---|---|
-| Text, rich text | `m.text`, @mentions as pills, Zalo quotes as real Matrix replies |
-| Photo | `m.image` (JPEG XL photos are converted to JPEG) |
-| Sticker | animated WebP `m.sticker` (still PNG for single-frame stickers) |
-| GIF | `m.image` `image/gif` |
-| Video / file / voice | `m.video` / `m.file` / `m.audio` voice note |
-| Link card | text + `com.beeper.linkpreviews` (title, description, thumbnail) |
-| Location, call log, system rows (pins, joins, polls…) | readable text / notice |
-| Media whose bytes no longer exist anywhere | a text line, e.g. `📷 [Ảnh 1920×1080 — không còn trên máy chủ Zalo]` |
+| Zalo message                                          | In Beeper                                                            |
+| ----------------------------------------------------- | -------------------------------------------------------------------- |
+| Text, rich text                                       | `m.text`, @mentions as pills, Zalo quotes as real Matrix replies     |
+| Photo                                                 | `m.image` (JPEG XL photos are converted to JPEG)                     |
+| Sticker                                               | animated WebP `m.sticker` (still PNG for single-frame stickers)      |
+| GIF                                                   | `m.image` `image/gif`                                                |
+| Video / file / voice                                  | `m.video` / `m.file` / `m.audio` voice note                          |
+| Link card                                             | text + `com.beeper.linkpreviews` (title, description, thumbnail)     |
+| Location, call log, system rows (pins, joins, polls…) | readable text / notice                                               |
+| Media whose bytes no longer exist anywhere            | a text line, e.g. `📷 [Ảnh 1920×1080 — không còn trên máy chủ Zalo]` |
 
 Where media comes from, in order: the backup copy (if prepared), then the Zalo CDN. **Zalo CDN links for photos, videos, files and voice expire about 14 days after sending**; Zalo Cloud (`zpcloud`/`zfcloud`), GIF and sticker hosts are permanent. Old media therefore only survives through the backup, which holds the media Zalo PC had downloaded.
 
@@ -222,19 +222,19 @@ The script runs the importer baked into the image (`/app/src/tools/import-zalo-e
 podman exec -u node -w /data zalo-beeper-bridge node /app/src/tools/import-zalo-export.ts <exportDir> [options]
 ```
 
-| Option | Meaning |
-|---|---|
-| `--only k1,k2` | limit to these thread keys (required for `--rebuild`) |
-| `--dry-run [--probe]` | print per-chat counts by kind; `--probe` actually tries every download (no upload) |
-| `--rebuild` | new room per chat with the full ordered history, live-only messages carried over, then repoint the thread |
-| `--remove-old` | with `--rebuild`: verify the new room, then delete the superseded room |
-| `--carry-from !r1,!r2` | with `--rebuild`: also keep live-only messages from these earlier rooms of the thread |
-| `--verify` | read-only: every export message is mapped to the chat's room and every mapped message is a real event in its Beeper timeline |
-| `--retire !old1,!old2` | verify one `--only` chat, then delete these superseded rooms |
-| `--media-dir DIR` | backup media prepared by `backup-media.mjs` |
-| `--own-uid UID` | your Zalo uid (mentions of you become pills for your account) |
-| `--batch N` / `--delay-ms N` | batch size (100) and pause between batches (1500 ms) |
-| `--media-days N` | try expiring CDN links only for messages younger than N days (16) |
+| Option                       | Meaning                                                                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `--only k1,k2`               | limit to these thread keys (required for `--rebuild`)                                                                        |
+| `--dry-run [--probe]`        | print per-chat counts by kind; `--probe` actually tries every download (no upload)                                           |
+| `--rebuild`                  | new room per chat with the full ordered history, live-only messages carried over, then repoint the thread                    |
+| `--remove-old`               | with `--rebuild`: verify the new room, then delete the superseded room                                                       |
+| `--carry-from !r1,!r2`       | with `--rebuild`: also keep live-only messages from these earlier rooms of the thread                                        |
+| `--verify`                   | read-only: every export message is mapped to the chat's room and every mapped message is a real event in its Beeper timeline |
+| `--retire !old1,!old2`       | verify one `--only` chat, then delete these superseded rooms                                                                 |
+| `--media-dir DIR`            | backup media prepared by `backup-media.mjs`                                                                                  |
+| `--own-uid UID`              | your Zalo uid (mentions of you become pills for your account)                                                                |
+| `--batch N` / `--delay-ms N` | batch size (100) and pause between batches (1500 ms)                                                                         |
+| `--media-days N`             | try expiring CDN links only for messages younger than N days (16)                                                            |
 
 Without `--rebuild` the importer runs in **prepend** mode: it only adds history older than the room's first bridged message (Beeper's batch-send API can only insert before the oldest or after the newest event — never in the middle), so use `--rebuild` whenever messages are missing between ones already in Beeper.
 
