@@ -1,12 +1,15 @@
 // Normalized Zalo event model — the only shapes the bridge layer sees.
 // Derived from live fixtures captured in Phase 1 (plans/.../reports/phase-01-spike-findings.md).
+import type { LinkPreview, MediaDescriptor } from "../bridge/media-content.ts";
 
 export type ZaloThreadType = "user" | "group";
 
 export type ZaloContent =
-  | { kind: "text"; text: string }
+  | { kind: "text"; text: string; linkPreview?: LinkPreview }
   | { kind: "photo"; url: string; thumbUrl?: string; width?: number; height?: number; caption?: string }
   | { kind: "sticker"; id: number; catId: number }
+  /** video / file / voice / GIF / doodle — rendered by bridge/media-content.ts */
+  | { kind: "media"; media: MediaDescriptor }
   | { kind: "unsupported"; msgType: string };
 
 export interface ZaloMessage {
@@ -98,5 +101,7 @@ export interface RawZaloMessage {
     ttl?: number;
     quote?: { globalMsgId?: string | number };
     mentions?: Array<{ uid: string; pos: number; len: number }>;
+    /** present on end-to-end-encrypted 1-1 pushes (ws cmd 551): content is Signal ciphertext */
+    e2ee?: unknown;
   };
 }

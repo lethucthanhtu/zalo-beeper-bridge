@@ -131,6 +131,7 @@ const publishZaloState = createZaloStatePublisher({
 
 zalo.on("connected", () => {
   console.log("[zalo] listener connected");
+  void portals.repairDmGhostNames().catch((err) => console.warn("DM name repair failed:", err));
   void publishZaloState("CONNECTED");
 });
 zalo.on("reconnecting", (attempt, delayMs) => {
@@ -149,7 +150,7 @@ zalo.on("message", (msg) => {
 const presence = new PresenceHandler(store, puppets, zalo, config.matrix.owner, () => zalo.ownId);
 zalo.on("seen", (ev) => void presence.handleSeen(ev).catch((err) => console.warn("seen handling failed:", err)));
 // Typing mirroring disabled on request — re-enable by uncommenting:
-// zalo.on("typing", (ev) => void presence.handleTyping(ev).catch((err) => console.warn("typing handling failed:", err)));
+zalo.on("typing", (ev) => void presence.handleTyping(ev).catch((err) => console.warn("typing handling failed:", err)));
 zalo.on("reaction", (ev) => void presence.handleReaction(ev).catch((err) => console.warn("reaction handling failed:", err)));
 
 // Appservice MUST be up before the Zalo listener: intents throw pre-initialise,

@@ -151,4 +151,20 @@ describe("PortalManager", () => {
     expect(store.getAllPortals().map((p) => p.thread_id)).toEqual(["456"]);
     expect(store.getPuppetDisplayName("u123")).toBeNull();
   });
+
+  it("names an unnamed DM ghost from the Zalo profile (DM opened by the owner's own message)", async () => {
+    const { bridge, intent } = mockBridge();
+    const resolve = vi.fn(async () => ({ displayName: "Bob" }));
+    const puppets = new PuppetRegistry(bridge, store, "beeper.local", resolve);
+    const portals = new PortalManager(bridge, store, puppets, OWNER, { name: "Zalo", logoPath: "assets/zalo-logo.png", networkId: "zalo", stateKey: "beeper.local/sh-zalo" });
+    store.insertPortal({ thread_id: "777", thread_type: "user", room_id: "!dm:beeper.local", name: null });
+    store.upsertPuppet("777", "@sh-zalo_777:beeper.local", null);
+    await portals.repairDmGhostNames();
+    expect(resolve).toHaveBeenCalledWith("777");
+    expect(store.getPuppetDisplayName("777")).toBe("Bob");
+    expect(intent.setDisplayName).toHaveBeenCalledWith("Bob");
+    resolve.mockClear();
+    await portals.repairDmGhostNames(); // named now → no further lookups
+    expect(resolve).not.toHaveBeenCalled();
+  });
 });

@@ -60,4 +60,28 @@ describe("MappingStore", () => {
     expect(store.upsertPuppet("u1", "@sh-zalo_u1:x", "New Name")).toBe(true); // renamed
     expect(store.upsertPuppet("u2", "@sh-zalo_u2:x", null)).toBe(false); // new without name
   });
+  it("repoints a rebuilt thread to its new room, keeping reply/recall data", () => {
+    store.insertPortal({ thread_id: "t1", thread_type: "group", room_id: "!old:x", name: "G" });
+    store.recordMessage("m1", "!old:x", "$a", "inbound", "{\"q\":1}", "c1", "u9", "webchat");
+    store.recordMessage("live-only", "!old:x", "$b", "inbound");
+    store.repointPortal({ thread_id: "t1", thread_type: "group", room_id: "!new:x", name: null }, [
+      { msgId: "m1", eventId: "$a2", direction: "inbound", cliMsgId: "c1", msgType: "1" },
+      { msgId: "m0", eventId: "$z", direction: "outbound", cliMsgId: null, msgType: "1" },
+    ]);
+    expect(store.getPortalByThread("t1")).toMatchObject({ room_id: "!new:x", name: "G" });
+    expect(store.getEventByZaloMsgId("m1")).toEqual({ eventId: "$a2", roomId: "!new:x" });
+    expect(store.getQuoteJsonByEventId("$a2")).toBe("{\"q\":1}");
+    expect(store.getSeenTargetByEventId("$a2")).toMatchObject({ senderId: "u9", msgType: "webchat" });
+    expect(store.getEventByZaloMsgId("m0")).toEqual({ eventId: "$z", roomId: "!new:x" });
+    expect([...store.getRoomMessageIds("!old:x")]).toEqual(["live-only"]);
+  });
+  it("drops mappings of a removed room but never of a live portal", () => {
+    store.insertPortal({ thread_id: "t1", thread_type: "user", room_id: "!live:x", name: null });
+    store.recordMessage("a", "!old:x", "$a", "inbound");
+    store.recordMessage("b", "!live:x", "$b", "inbound");
+    expect(store.deleteRoomMessages("!old:x")).toBe(1);
+    expect(store.hasMessage("a")).toBe(false);
+    expect(() => store.deleteRoomMessages("!live:x")).toThrow();
+    expect(store.hasMessage("b")).toBe(true);
+  });
 });

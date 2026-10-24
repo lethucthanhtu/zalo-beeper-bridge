@@ -99,14 +99,57 @@ describe("normalizeZaloMessage", () => {
     const m = normalizeZaloMessage({
       ...dmText,
       isSelf: true,
-      data: { ...dmText.data, msgType: "chat.voice", content: { something: true } },
+      data: { ...dmText.data, msgType: "chat.todo", content: { something: true } },
     });
     expect(m?.isSelf).toBe(true);
-    expect(m?.content).toEqual({ kind: "unsupported", msgType: "chat.voice" });
+    expect(m?.content).toEqual({ kind: "unsupported", msgType: "chat.todo" });
+  });
+
+  it("normalizes video / file / voice / GIF attachments to media descriptors", () => {
+    const of = (msgType: string, content: unknown) => normalizeZaloMessage({ ...dmText, data: { ...dmText.data, msgType, content } })?.content;
+    expect(of("chat.video.msg", { href: "https://v.dlmd.me/a", params: '{"duration":7000,"video_width":576,"video_height":1024,"fileSize":99}' })).toEqual({
+      kind: "media",
+      media: { kind: "video", urls: ["https://v.dlmd.me/a"], filename: "zalo-video.mp4", caption: undefined, width: 576, height: 1024, durationMs: 7000, size: 99 },
+    });
+    expect(of("share.file", { title: "a.pdf", href: "https://f.zdn.vn/a", params: '{"fileSize":"375945"}' })).toEqual({
+      kind: "media",
+      media: { kind: "file", urls: ["https://f.zdn.vn/a"], filename: "a.pdf", size: 375945 },
+    });
+    expect(of("chat.voice", { href: "https://v.zdn.vn/a.m4a", params: '{"duration":4000}' })).toMatchObject({ kind: "media", media: { kind: "audio", durationMs: 4000 } });
+    expect(of("chat.gif", { href: "https://zalo-gif.zadn.vn/a.gif", thumb: "https://zalo-gif.zadn.vn/a.jpg" })).toMatchObject({
+      kind: "media",
+      media: { kind: "image", urls: ["https://zalo-gif.zadn.vn/a.gif", "https://zalo-gif.zadn.vn/a.jpg"] },
+    });
+  });
+
+  it("renders link cards as text with a Beeper link preview", () => {
+    const m = normalizeZaloMessage({
+      ...dmText,
+      data: {
+        ...dmText.data,
+        msgType: "chat.recommended",
+        content: { href: "https://lttt.dev/x", title: "https://lttt.dev/x", description: "Mô tả", thumb: "https://photo-link-talk.zadn.vn/t.jpg", params: '{"mediaTitle":"Trang X"}' },
+      },
+    });
+    expect(m?.content).toEqual({
+      kind: "text",
+      text: "https://lttt.dev/x",
+      linkPreview: { url: "https://lttt.dev/x", title: "Trang X", description: "Mô tả", imageUrl: "https://photo-link-talk.zadn.vn/t.jpg" },
+    });
   });
 
   it("returns null when msgId is missing", () => {
     const m = normalizeZaloMessage({ ...dmText, data: { ...dmText.data, msgId: "" } });
     expect(m).toBeNull();
+  });
+
+  it("never exposes E2EE ciphertext as text (cmd 551 pushes carry an e2ee field)", () => {
+    const msg = normalizeZaloMessage({
+      type: 0,
+      threadId: "111",
+      isSelf: false,
+      data: { msgId: "9", msgType: "webchat", uidFrom: "111", ts: "1", content: "MwohBQ==", e2ee: '{"version":1,"compat_version":0,"iid":603}' },
+    });
+    expect(msg?.content).toEqual({ kind: "unsupported", msgType: "e2ee" });
   });
 });

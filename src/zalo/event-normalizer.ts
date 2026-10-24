@@ -1,4 +1,5 @@
 // Raw zca-js message → ZaloMessage. All zca-js payload quirks live here.
+import type { MediaDescriptor } from "../bridge/media-content.ts";
 import type { RawZaloMessage, ZaloContent, ZaloMessage } from "./types.ts";
 
 /** chat.photo content shape observed in fixtures */
@@ -40,17 +41,80 @@ function normalizeContent(msgType: string, content: unknown): ZaloContent {
       return { kind: "sticker", id: sticker.id, catId: sticker.catId };
     }
   }
-  // Link/card types (chat.recommended, chat.link, chat.ecard, ...) carry an href +
-  // title/description — render as a readable text line instead of an "unsupported" notice.
   if (typeof content === "object" && content !== null) {
-    const card = content as { href?: string; title?: string; description?: string };
+    const media = normalizeMedia(msgType, content as AttachmentContent);
+    if (media) return { kind: "media", media };
+  }
+  // Link/card types (chat.recommended, chat.link, chat.ecard, ...) carry an href +
+  // title/description — a text line with the URL plus a Beeper link preview.
+  if (typeof content === "object" && content !== null) {
+    const card = content as AttachmentContent;
     if (card.href) {
+      const params = parseParams(card.params);
       const label = card.title || card.description || "";
       const text = label && !label.includes(card.href) ? `${label}\n${card.href}` : card.href;
-      return { kind: "text", text };
+      const title = (typeof params.mediaTitle === "string" && params.mediaTitle) || (card.title && card.title !== card.href ? card.title : "");
+      const description = card.description && card.description !== card.href && card.description !== title ? card.description : "";
+      const linkPreview = /^https?:\/\//.test(card.href)
+        ? {
+            url: card.href,
+            ...(title ? { title } : {}),
+            ...(description ? { description } : {}),
+            ...(card.thumb && /^https?:\/\//.test(card.thumb) ? { imageUrl: card.thumb } : {}),
+          }
+        : undefined;
+      return { kind: "text", text, ...(linkPreview ? { linkPreview } : {}) };
     }
   }
   return { kind: "unsupported", msgType };
+}
+
+interface AttachmentContent {
+  href?: string;
+  thumb?: string;
+  title?: string;
+  description?: string;
+  params?: string;
+}
+
+function parseParams(params: string | undefined): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(params ?? "{}");
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {}; // params malformed — all fields are optional
+  }
+}
+
+const positive = (v: unknown): number | undefined => (Number(v) > 0 ? Number(v) : undefined);
+
+/** Video / file / voice / GIF / doodle attachments → a downloadable media descriptor. */
+function normalizeMedia(msgType: string, c: AttachmentContent): MediaDescriptor | null {
+  if (!c.href) return null;
+  const p = parseParams(c.params);
+  switch (msgType) {
+    case "chat.video.msg":
+      return {
+        kind: "video",
+        urls: [c.href],
+        filename: "zalo-video.mp4",
+        caption: c.title || undefined,
+        width: positive(p.video_width),
+        height: positive(p.video_height),
+        durationMs: positive(p.duration),
+        size: positive(p.fileSize),
+      };
+    case "share.file":
+      return { kind: "file", urls: [c.href], filename: c.title || "zalo-file", size: positive(p.fileSize) };
+    case "chat.voice":
+      return { kind: "audio", urls: [c.href], filename: "zalo-voice.m4a", durationMs: positive(p.duration), size: positive(p.fileSize) };
+    case "chat.gif":
+      return { kind: "image", urls: [c.href, ...(c.thumb ? [c.thumb] : [])], filename: "zalo.gif", width: positive(p.width), height: positive(p.height) };
+    case "chat.doodle":
+      return { kind: "image", urls: [c.href], filename: "zalo-doodle.png", width: positive(p.width), height: positive(p.height) };
+    default:
+      return null;
+  }
 }
 
 /** Returns null for events that carry no bridgeable message (missing ids). */
@@ -58,7 +122,9 @@ export function normalizeZaloMessage(raw: RawZaloMessage): ZaloMessage | null {
   const d = raw.data;
   // uidFrom is the Phase 4 puppet key — never let "undefined" become a ghost id
   if (!d?.msgId || !raw.threadId || !d.uidFrom) return null;
-  const content = normalizeContent(d.msgType, d.content);
+  // E2EE 1-1 chats (Signal protocol): the content is ciphertext this web session cannot
+  // decrypt — never post it as text, surface a notice instead
+  const content: ZaloContent = d.e2ee ? { kind: "unsupported", msgType: "e2ee" } : normalizeContent(d.msgType, d.content);
   return {
     msgId: String(d.msgId),
     threadId: raw.threadId,

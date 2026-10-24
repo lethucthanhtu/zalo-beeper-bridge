@@ -128,6 +128,61 @@ export class MappingStore {
     return this.db.prepare("SELECT 1 FROM message WHERE room_id = ? LIMIT 1").get(roomId) !== undefined;
   }
 
+  /** When the first message was bridged into this room (history import cutoff), or null. */
+  getOldestMessageTs(roomId: string): number | null {
+    const row = this.db.prepare("SELECT MIN(ts) AS ts FROM message WHERE room_id = ?").get(roomId) as { ts: number | null };
+    return row.ts;
+  }
+
+  /** Messages bridged into a room in bridging order (outbound "evt:" echo guards excluded). */
+  getRoomMessages(roomId: string): Array<{
+    msgId: string;
+    eventId: string | null;
+    direction: MessageDirection;
+    cliMsgId: string | null;
+    msgType: string | null;
+  }> {
+    return this.db
+      .prepare(
+        "SELECT zalo_msg_id AS msgId, event_id AS eventId, direction, cli_msg_id AS cliMsgId, msg_type AS msgType FROM message WHERE room_id = ? AND zalo_msg_id NOT LIKE 'evt:%' ORDER BY ts, rowid",
+      )
+      .all(roomId) as Array<{ msgId: string; eventId: string | null; direction: MessageDirection; cliMsgId: string | null; msgType: string | null }>;
+  }
+
+  /** Zalo msgIds bridged into a room (outbound "evt:" echo guards excluded). */
+  getRoomMessageIds(roomId: string): Set<string> {
+    const rows = this.db.prepare("SELECT zalo_msg_id FROM message WHERE room_id = ? AND zalo_msg_id NOT LIKE 'evt:%'").all(roomId) as Array<{
+      zalo_msg_id: string;
+    }>;
+    return new Set(rows.map((r) => r.zalo_msg_id));
+  }
+
+  /**
+   * History rebuild: point a thread at a freshly backfilled room in one transaction.
+   * Messages already known keep their quote/cliMsgId/sender (replies, recall and seen
+   * receipts keep working) but move to the new room's event; new ones are inserted.
+   */
+  repointPortal(
+    row: PortalRow,
+    messages: Array<{ msgId: string; eventId: string; direction: MessageDirection; cliMsgId: string | null; msgType: string | null }>,
+  ): void {
+    this.db.transaction(() => {
+      const updated = this.db.prepare("UPDATE portal SET room_id = ?, name = COALESCE(?, name) WHERE thread_id = ?").run(row.room_id, row.name, row.thread_id);
+      if (updated.changes === 0) this.insertPortal(row);
+      const upsert = this.db.prepare(
+        `INSERT INTO message (zalo_msg_id, room_id, event_id, direction, ts, cli_msg_id, msg_type) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(zalo_msg_id) DO UPDATE SET room_id = excluded.room_id, event_id = excluded.event_id`,
+      );
+      for (const m of messages) upsert.run(m.msgId, row.room_id, m.eventId, m.direction, Date.now(), m.cliMsgId, m.msgType);
+    })();
+  }
+
+  /** Forgets every message mapping of a removed (no longer portal) room. */
+  deleteRoomMessages(roomId: string): number {
+    if (this.isPortalRoom(roomId)) throw new Error(`refusing to drop messages of live portal room ${roomId}`);
+    return this.db.prepare("DELETE FROM message WHERE room_id = ?").run(roomId).changes;
+  }
+
   /** Drops a portal and its message mappings (used to discard malformed portals). */
   deletePortal(threadId: string): void {
     const portal = this.getPortalByThread(threadId);

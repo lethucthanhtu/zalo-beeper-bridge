@@ -69,6 +69,18 @@ export class PortalManager {
     for (const portal of this.store.getAllPortals()) await this.ensureOwnerJoined(portal.room_id);
   }
 
+  /**
+   * Give unnamed DM ghosts their Zalo name (portals created from the owner's own
+   * message had none, so Beeper listed the chat as "sh-zalo_<uid>"). Run once Zalo is
+   * connected — the name comes from a Zalo profile lookup.
+   */
+  async repairDmGhostNames(): Promise<void> {
+    for (const portal of this.store.getAllPortals()) {
+      if (portal.thread_type !== "user" || this.store.getPuppetDisplayName(portal.thread_id) !== null) continue;
+      await this.puppets.ensurePuppet(portal.thread_id);
+    }
+  }
+
   /** Re-emit the network state event on every existing portal (branding backfill). */
   async rebrandExistingPortals(): Promise<void> {
     const botMxid = this.bridge.getBot().getUserId();
@@ -115,6 +127,30 @@ export class PortalManager {
   }
 
   private async createPortal(ctx: PortalContext): Promise<PortalRow> {
+    const row = await this.provisionRoom(ctx);
+    this.store.insertPortal(row);
+    await this.finishRoom(row, ctx.senderId);
+    return row;
+  }
+
+  /**
+   * History rebuild: a fully set-up portal room (branding, owner joined) that is NOT
+   * recorded yet — live traffic keeps using the old room until the importer repoints.
+   */
+  async createDetachedPortal(ctx: PortalContext): Promise<PortalRow> {
+    const row = await this.provisionRoom(ctx);
+    await this.finishRoom(row, ctx.senderId);
+    return row;
+  }
+
+  private async finishRoom(row: PortalRow, senderId: string): Promise<void> {
+    // Network state must be sent by the room creator (ghost for DM, bot for group)
+    const brandIntent = row.thread_type === "user" ? this.puppets.intentFor(senderId) : this.bridge.getIntent();
+    await tagPortalNetwork(brandIntent, row.room_id, row.thread_id, row.name ?? this.branding.name, row.thread_type, this.branding, this.bridge.getBot().getUserId());
+    await this.ensureOwnerJoined(row.room_id);
+  }
+
+  private async provisionRoom(ctx: PortalContext): Promise<PortalRow> {
     let row: PortalRow;
     if (ctx.threadType === "user") {
       // DM portal: created BY the ghost so Beeper renders it as a direct chat
@@ -140,11 +176,6 @@ export class PortalManager {
       });
       row = { thread_id: ctx.threadId, thread_type: "group", room_id, name: groupName };
     }
-    this.store.insertPortal(row);
-    // Network state must be sent by the room creator (ghost for DM, bot for group)
-    const brandIntent = ctx.threadType === "user" ? this.puppets.intentFor(ctx.senderId) : this.bridge.getIntent();
-    await tagPortalNetwork(brandIntent, row.room_id, row.thread_id, row.name ?? this.branding.name, row.thread_type, this.branding, this.bridge.getBot().getUserId());
-    await this.ensureOwnerJoined(row.room_id);
     return row;
   }
 

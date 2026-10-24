@@ -3,6 +3,7 @@
 // would otherwise interleave async sends within one conversation).
 import type { Bridge } from "matrix-appservice-bridge";
 import type { EchoSuppressor } from "./echo-suppressor.ts";
+import { buildLinkPreview, buildMediaEvent, fetchFirstMedia, LARGE_MEDIA_MAX_BYTES } from "./media-content.ts";
 import { bridgeInboundPhoto, bridgeInboundSticker } from "./media-handler.ts";
 import { buildInboundMentions } from "./mentions.ts";
 import { SELF_BRIDGE_MARKER } from "./outbound-handler.ts";
@@ -118,6 +119,14 @@ export class InboundHandler {
           textContent.formatted_body = formattedBody;
           textContent["m.mentions"] = { user_ids: userIds };
         }
+        const preview = msg.content.linkPreview;
+        if (preview) {
+          const upload = (buffer: Buffer, o: { type: string; name: string }) => intent.uploadContent(buffer, o);
+          // A failed thumbnail upload still leaves a text-only preview
+          textContent["com.beeper.linkpreviews"] = [
+            await buildLinkPreview(upload, preview, this.deps.mediaMaxBytes).catch(() => ({ matched_url: preview.url, "og:url": preview.url })),
+          ];
+        }
         const r = await intent.sendMessage(portal.room_id, textContent);
         eventId = r.event_id;
         break;
@@ -138,8 +147,8 @@ export class InboundHandler {
       }
       case "sticker": {
         try {
-          const url = await this.deps.resolveStickerUrl(msg.content.id);
-          if (!url) throw new Error("sticker image unavailable");
+          // Still-image URL is only the fallback: animated stickers are built from the sprite
+          const url = await this.deps.resolveStickerUrl(msg.content.id).catch(() => null);
           const r = await bridgeInboundSticker(intent, portal.room_id, msg.content.id, url, this.deps.mediaMaxBytes, extra);
           eventId = r.eventId;
         } catch {
@@ -148,10 +157,33 @@ export class InboundHandler {
         }
         break;
       }
+      case "media": {
+        const media = msg.content.media;
+        // Videos and documents are routinely bigger than the photo cap
+        const cap = media.kind === "video" || media.kind === "file" ? Math.max(this.deps.mediaMaxBytes, LARGE_MEDIA_MAX_BYTES) : this.deps.mediaMaxBytes;
+        const bytes = await fetchFirstMedia(media.urls, cap);
+        if (bytes) {
+          const upload = (buffer: Buffer, o: { type: string; name: string }) => intent.uploadContent(buffer, o);
+          const built = await buildMediaEvent(upload, media, bytes);
+          const r = await intent.sendEvent(portal.room_id, built.type, { ...built.content, ...extra });
+          eventId = r.event_id;
+        } else {
+          const r = await intent.sendMessage(portal.room_id, {
+            msgtype: "m.notice",
+            body: `[Zalo ${media.kind} could not be bridged${media.filename ? `: ${media.filename}` : ""}]\n${media.urls[0] ?? ""}`,
+            ...extra,
+          });
+          eventId = r.event_id;
+        }
+        break;
+      }
       case "unsupported": {
         const r = await intent.sendMessage(portal.room_id, {
           msgtype: "m.notice",
-          body: `[Zalo message type not supported by bridge: ${msg.content.msgType}]`,
+          body:
+            msg.content.msgType === "e2ee"
+              ? "🔒 Tin nhắn mã hoá đầu cuối của Zalo — bridge không giải mã được. Mở Zalo trên điện thoại để đọc. (End-to-end encrypted Zalo message — open Zalo on your phone to read it.)"
+              : `[Zalo message type not supported by bridge: ${msg.content.msgType}]`,
           ...extra,
         });
         eventId = r.event_id;
