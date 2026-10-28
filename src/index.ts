@@ -166,9 +166,14 @@ zalo.on('connected', () => {
   // Multi-account groundwork: remember this account and file untagged rows under it
   const ownId = zalo.ownId;
   if (ownId) {
-    const assigned = store.bindAccount(ownId, config.zalo.credsPath);
-    if (assigned.portals || assigned.messages) {
-      console.log(`[bridge] account ${ownId}: ${assigned.portals} portals, ${assigned.messages} messages assigned`);
+    // a DB error (e.g. the history importer holding the write lock) must not crash the listener
+    try {
+      const assigned = store.bindAccount(ownId, config.zalo.credsPath);
+      if (assigned.portals || assigned.messages) {
+        console.log(`[bridge] account ${ownId}: ${assigned.portals} portals, ${assigned.messages} messages assigned`);
+      }
+    } catch (err) {
+      console.warn('[bridge] recording the Zalo account failed (retried on the next connect):', err);
     }
   }
   void portals.repairDmGhostNames().catch((err) => console.warn('DM name repair failed:', err));

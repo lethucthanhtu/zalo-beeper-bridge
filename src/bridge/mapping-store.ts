@@ -78,6 +78,14 @@ export class MappingStore {
     })();
   }
 
+  /**
+   * Stamps new rows with `zaloUid` without recording a login or touching existing rows —
+   * for the history importer, which writes on behalf of a known account (`--own-uid`).
+   */
+  useAccount(zaloUid: string): void {
+    this.accountId = zaloUid;
+  }
+
   /** Every Zalo account the bridge has logged in to, oldest first. */
   listAccounts(): AccountRow[] {
     return this.db.prepare('SELECT * FROM account ORDER BY added_at').all() as AccountRow[];
@@ -88,28 +96,34 @@ export class MappingStore {
    * `SCHEMA_VERSION`. No-op when the database is already current.
    */
   private migrate(): void {
-    const current = (this.db.pragma('user_version', { simple: true }) as number) ?? 0;
-    if (current >= SCHEMA_VERSION) return;
+    /** Schema version stored in the file. */
+    const storedVersion = () => (this.db.pragma('user_version', { simple: true }) as number) ?? 0;
+    if (storedVersion() >= SCHEMA_VERSION) return;
     // Transactional: a crash mid-migration must not leave ALTERs applied with a
-    // stale user_version (re-running an ALTER = duplicate-column crash loop)
-    this.db.transaction(() => {
-      if (current < 1) this.migrateV1();
-      if (current < 2) this.db.exec('ALTER TABLE puppet ADD COLUMN avatar_url TEXT');
-      if (current < 3) this.db.exec('ALTER TABLE message ADD COLUMN quote_json TEXT');
-      // cliMsgId is required by Zalo reaction/undo APIs; store per inbound message
-      if (current < 4) this.db.exec('ALTER TABLE message ADD COLUMN cli_msg_id TEXT');
-      // sender_id + msg_type let us build a Zalo seen event (Beeper read → Zalo "seen")
-      if (current < 5) {
-        this.db.exec('ALTER TABLE message ADD COLUMN sender_id TEXT');
-        this.db.exec('ALTER TABLE message ADD COLUMN msg_type TEXT');
-      }
-      // when the contact's Zalo profile was last looked up — so a contact without an
-      // avatar is not looked up again on every event (avatar_url stays null for them)
-      if (current < 6) this.db.exec('ALTER TABLE puppet ADD COLUMN profile_checked_at INTEGER');
-      // Multi-account groundwork (additive only — keys and lookups are unchanged): the
-      // accounts the bridge logged in to, and which account each portal / message is from
-      if (current < 7) {
-        this.db.exec(`
+    // stale user_version (re-running an ALTER = duplicate-column crash loop).
+    // IMMEDIATE + re-reading the version inside: when the bridge and the history
+    // importer open an old database at the same time, only the first one migrates.
+    this.db
+      .transaction(() => {
+        const current = storedVersion();
+        if (current >= SCHEMA_VERSION) return;
+        if (current < 1) this.migrateV1();
+        if (current < 2) this.db.exec('ALTER TABLE puppet ADD COLUMN avatar_url TEXT');
+        if (current < 3) this.db.exec('ALTER TABLE message ADD COLUMN quote_json TEXT');
+        // cliMsgId is required by Zalo reaction/undo APIs; store per inbound message
+        if (current < 4) this.db.exec('ALTER TABLE message ADD COLUMN cli_msg_id TEXT');
+        // sender_id + msg_type let us build a Zalo seen event (Beeper read → Zalo "seen")
+        if (current < 5) {
+          this.db.exec('ALTER TABLE message ADD COLUMN sender_id TEXT');
+          this.db.exec('ALTER TABLE message ADD COLUMN msg_type TEXT');
+        }
+        // when the contact's Zalo profile was last looked up — so a contact without an
+        // avatar is not looked up again on every event (avatar_url stays null for them)
+        if (current < 6) this.db.exec('ALTER TABLE puppet ADD COLUMN profile_checked_at INTEGER');
+        // Multi-account groundwork (additive only — keys and lookups are unchanged): the
+        // accounts the bridge logged in to, and which account each portal / message is from
+        if (current < 7) {
+          this.db.exec(`
           CREATE TABLE IF NOT EXISTS account (
             zalo_uid      TEXT PRIMARY KEY,
             creds_path    TEXT NOT NULL,
@@ -118,10 +132,13 @@ export class MappingStore {
           );
           ALTER TABLE portal ADD COLUMN account_id TEXT;
           ALTER TABLE message ADD COLUMN account_id TEXT;
+          -- bindAccount runs on every reconnect: find untagged messages without a table scan
+          CREATE INDEX message_account_untagged ON message(account_id) WHERE account_id IS NULL;
         `);
-      }
-      this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
-    })();
+        }
+        this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
+      })
+      .immediate();
   }
 
   /** Schema v1: creates the base `portal`, `puppet` and `message` tables (idempotent). */

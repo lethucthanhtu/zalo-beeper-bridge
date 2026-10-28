@@ -148,4 +148,19 @@ describe('MappingStore accounts (multi-account groundwork, schema v7)', () => {
     expect(store.getPortalByThread('t3')?.account_id).toBe('333');
     expect(store.listAccounts().map((account) => account.zalo_uid)).toEqual(['222', '333']);
   });
+
+  it('lets the history importer stamp rows for a known account without recording a login', () => {
+    store.insertPortal({ thread_id: 'old', thread_type: 'user', room_id: '!o:x', name: null });
+    store.useAccount('444');
+    store.insertPortal({ thread_id: 'imported', thread_type: 'user', room_id: '!i:x', name: null });
+    expect(store.getPortalByThread('imported')?.account_id).toBe('444');
+    expect(store.getPortalByThread('old')?.account_id).toBeNull(); // left for the bridge's bindAccount
+    expect(store.listAccounts()).toEqual([]);
+  });
+
+  it('opens an already-migrated database without migrating again', () => {
+    store.close();
+    store = new MappingStore(dbPath); // second open: v7 already, no duplicate-column error
+    expect(store.listAccounts()).toEqual([]);
+  });
 });

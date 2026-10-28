@@ -481,6 +481,8 @@ const bridge = new Bridge({
 await bridge.initialise(); // intents only — no listener, the live bridge keeps the port
 
 const store = new MappingStore(config.bridge.dbPath);
+// imported rows belong to this account (without --own-uid the live bridge files them on its next login)
+if (cliOptions.ownUid) store.useAccount(cliOptions.ownUid);
 const puppets = new PuppetRegistry(bridge, store, config.matrix.domain, undefined, `${bridgeAppId}_`);
 const portals = new PortalManager(bridge, store, puppets, owner, branding);
 const bot = bridge.getIntent();
