@@ -58,7 +58,7 @@ import { sniffMimetype } from '../bridge/media-handler.ts';
 import { buildInboundMentions } from '../bridge/mentions.ts';
 import { SELF_BRIDGE_MARKER } from '../bridge/outbound-handler.ts';
 import { PortalManager } from '../bridge/portal-manager.ts';
-import { PuppetRegistry } from '../bridge/puppet-registry.ts';
+import { bridgeIdFor, PuppetRegistry } from '../bridge/puppet-registry.ts';
 import { bridgeBranding } from '../matrix/network-branding.ts';
 
 // ---------------------------------------------------------------------------
@@ -235,7 +235,7 @@ const registration = loadYaml(fs.readFileSync(config.matrix.registrationPath, 'u
   id?: string;
   sender_localpart?: string;
 };
-const bridgeAppId = (registration.sender_localpart ?? 'sh-zalobot').replace(/bot$/, '');
+const bridgeAppId = bridgeIdFor(registration.sender_localpart);
 const branding = bridgeBranding(config, registration);
 const owner = config.matrix.owner;
 
@@ -481,7 +481,7 @@ const bridge = new Bridge({
 await bridge.initialise(); // intents only — no listener, the live bridge keeps the port
 
 const store = new MappingStore(config.bridge.dbPath);
-const puppets = new PuppetRegistry(bridge, store, config.matrix.domain);
+const puppets = new PuppetRegistry(bridge, store, config.matrix.domain, undefined, `${bridgeAppId}_`);
 const portals = new PortalManager(bridge, store, puppets, owner, branding);
 const bot = bridge.getIntent();
 
@@ -769,7 +769,7 @@ async function livePayload(
     if (remapped) content['m.relates_to'] = { 'm.in_reply_to': { event_id: remapped } };
     else delete content['m.relates_to'];
   }
-  const ghostUid = /^@sh-zalo_(\d+):/.exec(item.raw.sender)?.[1];
+  const ghostUid = puppets.uidFor(item.raw.sender);
   if (ghostUid && threadType === 'group') await portals.ensureGhostInRoom(ghostUid, newRoomId, names.get(ghostUid));
   return { type: item.raw.type, sender: item.raw.sender, origin_server_ts: item.raw.origin_server_ts, content };
 }

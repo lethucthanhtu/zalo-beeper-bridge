@@ -11,7 +11,7 @@ import { MappingStore } from './bridge/mapping-store.ts';
 import { OutboundHandler } from './bridge/outbound-handler.ts';
 import { PortalManager } from './bridge/portal-manager.ts';
 import { PresenceHandler } from './bridge/presence-handler.ts';
-import { assertGhostNamespace, PuppetRegistry } from './bridge/puppet-registry.ts';
+import { assertGhostNamespace, bridgeIdFor, PuppetRegistry } from './bridge/puppet-registry.ts';
 import { SyncManager } from './bridge/sync-manager.ts';
 import { createBridge, startBridge } from './matrix/appservice.ts';
 import { AVATAR_MAX_BYTES, createZaloStatePublisher } from './matrix/beeper-bridge-state.ts';
@@ -84,15 +84,21 @@ const registration = loadYaml(fs.readFileSync(config.matrix.registrationPath, 'u
 const asToken = registration.as_token;
 if (!asToken) throw new Error(`No as_token in ${config.matrix.registrationPath}`);
 // bridge name = sender_localpart minus the trailing "bot" (sh-zalobot → sh-zalo):
-// used for the remote-state endpoint and the double-puppet source tag
-const bridgeAppId = (registration.sender_localpart ?? 'sh-zalobot').replace(/bot$/, '');
+// used for the remote-state endpoint, the double-puppet source tag and the ghost prefix
+const bridgeAppId = bridgeIdFor(registration.sender_localpart);
 const branding = bridgeBranding(config, registration);
 
 // Shared between in/out handlers: event_ids the bridge posted as the owner (own
 // phone messages) + events already sent outbound — prevents re-sending / loops.
 const bridgedEventIds = new Set<string>();
 
-const puppets = new PuppetRegistry(bridge, store, config.matrix.domain, (uid) => zalo.getUserProfile(uid));
+const puppets = new PuppetRegistry(
+  bridge,
+  store,
+  config.matrix.domain,
+  (uid) => zalo.getUserProfile(uid),
+  `${bridgeAppId}_`,
+);
 const portals = new PortalManager(bridge, store, puppets, config.matrix.owner, branding);
 const inbound = new InboundHandler({
   bridge,
@@ -111,6 +117,7 @@ const inbound = new InboundHandler({
 const outbound = new OutboundHandler({
   bridge,
   store,
+  puppets,
   zalo,
   echo: echoSuppressor,
   ownerUserId: config.matrix.owner,

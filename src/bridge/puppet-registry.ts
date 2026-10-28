@@ -1,10 +1,16 @@
-// Zalo uid → Matrix ghost (@sh-zalo_<uid>:domain): registration + displayname sync.
+// Zalo uid → Matrix ghost (@<bridge>_<uid>:domain, e.g. @sh-zalo_<uid>): registration + displayname sync.
 import type { Bridge, Intent } from 'matrix-appservice-bridge';
 import { fetchMediaCapped } from './media-handler.ts';
 import type { MappingStore } from './mapping-store.ts';
 
-/** Localpart prefix of every ghost MXID; must match the registration's user namespace. */
+/** Default ghost localpart prefix (bridge registered as `sh-zalo`). */
 export const GHOST_PREFIX = 'sh-zalo_';
+
+/**
+ * Bridge name from the registration's bot localpart: `bbctl register <name>` makes the bot
+ * `<name>bot` and the ghost namespace `@<name>_.+`, so a second bridge (`sh-zalo2`) differs.
+ */
+export const bridgeIdFor = (senderLocalpart?: string): string => (senderLocalpart ?? 'sh-zalobot').replace(/bot$/, '');
 
 /**
  * Looks up a Zalo contact's profile. Resolves null when the lookup is not possible
@@ -21,6 +27,7 @@ export class PuppetRegistry {
   private readonly store: MappingStore;
   private readonly domain: string;
   private readonly resolveProfile?: ProfileResolver;
+  private readonly ghostPrefix: string;
   /** ghost MXIDs already registered this run (skips the ensureRegistered round-trip) */
   private readonly registered = new Set<string>();
   /** uids whose missing name was already looked up this run (one Zalo call each) */
@@ -31,17 +38,33 @@ export class PuppetRegistry {
    * @param store Persistent puppet table (names, avatar sync state).
    * @param domain Homeserver domain of the ghost MXIDs.
    * @param resolveProfile Optional Zalo profile lookup; without it no name lookup or avatar sync happens.
+   * @param ghostPrefix Ghost localpart prefix, `${bridgeIdFor(sender_localpart)}_`.
    */
-  constructor(bridge: Bridge, store: MappingStore, domain: string, resolveProfile?: ProfileResolver) {
+  constructor(
+    bridge: Bridge,
+    store: MappingStore,
+    domain: string,
+    resolveProfile?: ProfileResolver,
+    ghostPrefix = GHOST_PREFIX,
+  ) {
     this.bridge = bridge;
     this.store = store;
     this.domain = domain;
     this.resolveProfile = resolveProfile;
+    this.ghostPrefix = ghostPrefix;
   }
 
-  /** Ghost MXID for a Zalo uid: `@sh-zalo_<uid>:<domain>`. */
+  /** Ghost MXID for a Zalo uid: `@<prefix><uid>:<domain>`. */
   mxidFor(zaloUid: string): string {
-    return `@${GHOST_PREFIX}${zaloUid}:${this.domain}`;
+    return `@${this.ghostPrefix}${zaloUid}:${this.domain}`;
+  }
+
+  /** Zalo uid behind one of this bridge's ghost MXIDs, or null for any other user. */
+  uidFor(mxid: string): string | null {
+    const localpart = /^@([^:]+):/.exec(mxid)?.[1];
+    return localpart?.startsWith(this.ghostPrefix) && localpart.length > this.ghostPrefix.length
+      ? localpart.slice(this.ghostPrefix.length)
+      : null;
   }
 
   /** Ghost Intent for a Zalo uid, without registering it or syncing its profile. */

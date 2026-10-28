@@ -10,6 +10,7 @@ import type { EchoSuppressor } from './echo-suppressor.ts';
 import { downloadMatrixMedia } from './media-handler.ts';
 import { mentionsFromUserIds, parseOutboundMentions } from './mentions.ts';
 import type { MappingStore, PortalRow } from './mapping-store.ts';
+import type { PuppetRegistry } from './puppet-registry.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
 
 /** Removes the Matrix rich-reply fallback ("> <@user> quoted text" lines + blank line). */
@@ -76,6 +77,8 @@ export function buildFilename(msgtype: string, nameHint: string | undefined, mim
 export type OutboundHandlerDeps = {
   bridge: Bridge;
   store: MappingStore;
+  /** maps mentioned ghost MXIDs back to Zalo uids */
+  puppets: PuppetRegistry;
   zalo: ZaloClient;
   echo: EchoSuppressor;
   ownerUserId: string;
@@ -198,8 +201,7 @@ export class OutboundHandler {
     /** Zalo uid behind a mentioned MXID: the owner maps to our own Zalo id, ghosts to their uid, others to null. */
     const uidFromMxid = (mxid: string): string | null => {
       if (mxid === this.deps.ownerUserId) return this.deps.zalo.ownId;
-      const ghostMatch = /^@sh-zalo_(.+):/.exec(mxid);
-      return ghostMatch ? ghostMatch[1]! : null;
+      return this.deps.puppets.uidFor(mxid);
     };
     let mentions = mentionsFromUserIds(body, userIds, (mxid) => {
       const uid = uidFromMxid(mxid);
