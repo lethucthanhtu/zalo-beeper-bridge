@@ -18,12 +18,12 @@
   "type": "module",
   "dependencies": {
     "better-sqlite3": "12.11.1",
-    "image-size": "2.0.2",
-    "js-yaml": "5.2.1",
+    "image-size": "2.0.4",
+    "js-yaml": "5.5.0",
     "matrix-appservice-bridge": "11.2.0",
     "wasm-webp": "0.1.0",
     "zca-js": "2.1.2",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "private": true,
   "devDependencies": {
@@ -36,6 +36,6 @@
     "prettier": "3.9.9",
     "typescript": "6.0.3",
     "typescript-eslint": "8.62.1",
-    "vitest": "4.1.9"
+    "vitest": "4.1.12"
   }
 }
