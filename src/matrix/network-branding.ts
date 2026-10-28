@@ -107,7 +107,8 @@ export async function ensureNetworkIdentity(bridge: Bridge, branding: NetworkBra
   };
   if (logoMxc) profile.avatar_url = logoMxc;
   await intent.matrixClient
-    .doRequest('PATCH', `/_matrix/client/v3/profile/${encodeURIComponent(botMxid)}`, null, profile)
+    // bot-sdk 0.10 types omit PATCH, but its undici transport sends any method
+    .doRequest('PATCH' as 'PUT', `/_matrix/client/v3/profile/${encodeURIComponent(botMxid)}`, null, profile)
     .catch((err: Error) => console.warn('bot profile PATCH failed:', err.message));
 }
 
