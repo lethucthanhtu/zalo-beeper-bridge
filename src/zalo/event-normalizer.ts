@@ -47,7 +47,7 @@ function normalizeContent(msgType: string, content: unknown): ZaloContent {
         thumbUrl: photo.thumb,
         width,
         height,
-        caption: photo.title || photo.description || undefined,
+        caption: [photo.title, photo.description].find((text) => text && !FILE_NAME.test(text)) || undefined,
       };
     }
   }
@@ -65,6 +65,15 @@ function normalizeContent(msgType: string, content: unknown): ZaloContent {
     }
     const media = normalizeMedia(msgType, content as AttachmentContent);
     if (media) return { kind: 'media', media };
+    if (msgType === 'chat.location.new') return normalizeLocation(content as AttachmentContent);
+    // Contact card ("danh thiếp"; Zalo's own typo): the href is a placeholder (zaloapp.com)
+    if (card.action === 'recommened.user') return normalizeContactCard(card);
+    // Web cards (OA / mini-app / payment cards) with no href: render their label as text;
+    // with an href they fall through to the link-card branch below
+    if (WEB_CONTENT_TYPES.has(msgType) && !card.href) {
+      const text = [card.title, card.description].filter(Boolean).join('\n');
+      return { kind: 'text', text: text || '[Zalo web card — open Zalo to view]' };
+    }
   }
   // Link/card types (chat.recommended, chat.link, chat.ecard, ...) carry an href +
   // title/description — a text line with the URL plus a Beeper link preview.
@@ -113,6 +122,59 @@ function parseParams(params: string | undefined): Record<string, unknown> {
   } catch {
     return {}; // params malformed — all fields are optional
   }
+}
+
+/** chat.webcontent (52) and its v2 variant (61) — type codes from Za-go's msgType table */
+const WEB_CONTENT_TYPES = new Set(['chat.webcontent', 'chat.webcontent.v2']);
+
+/** A photo title that is just the sent file's name (e.g. "IMG_0012.JPG") is not a caption */
+const FILE_NAME = /^[^\s/\\]+\.(jpe?g|png|gif|webp|heic|heif|jxl|bmp)$/i;
+
+/**
+ * Contact card → its QR code as an image captioned with name, phone and a zalo.me link
+ * (the link opens the Zalo app on phones); text with an avatar preview when there is no
+ * QR. Live shape: title = name, description = JSON {phone?, qrCodeUrl?}, params = the
+ * contact's uid, thumb = avatar. phone is absent when the contact hides it.
+ */
+function normalizeContactCard(card: AttachmentContent): ZaloContent {
+  const details = parseParams(card.description);
+  const phone = typeof details.phone === 'string' && /^\+?\d{6,15}$/.test(details.phone) ? details.phone : '';
+  const qrUrl = typeof details.qrCodeUrl === 'string' && /^https:\/\//.test(details.qrCodeUrl) ? details.qrCodeUrl : '';
+  const name = card.title || 'Zalo contact';
+  const url = phone ? `https://zalo.me/${phone}` : '';
+  const text = [`👤 Danh thiếp Zalo: ${name}`, phone && `📞 ${phone}`, url && `Mở trong Zalo: ${url}`]
+    .filter(Boolean)
+    .join('\n');
+  if (qrUrl) return { kind: 'photo', url: qrUrl, caption: url ? text : `${text}\n(quét QR bằng Zalo để mở)` };
+  if (!url) return { kind: 'text', text };
+  const imageUrl = card.thumb && /^https:\/\//.test(card.thumb) ? card.thumb : undefined;
+  return { kind: 'text', text, linkPreview: { url, title: name, ...(imageUrl ? { imageUrl } : {}) } };
+}
+
+/**
+ * Shared location (chat.location.new) → a native Matrix location (map preview; tapping
+ * opens the device's default maps app), with "📍 place / address / Google Maps link" as
+ * the text fallback. Without coordinates it is text only. Live shape: title = place
+ * name ('' for "my location"), description = address, params = JSON {isUserLocation,
+ * srcId, latitude, longitude}; lat/lng spellings are tried too.
+ */
+function normalizeLocation(location: AttachmentContent): ZaloContent {
+  const fields: Record<string, unknown> = { ...parseParams(location.params), ...(location as Record<string, unknown>) };
+  /** First key holding a finite number (numeric strings accepted). */
+  const pick = (...keys: string[]) =>
+    keys.map((key) => Number(fields[key])).find((value) => Number.isFinite(value) && value !== 0);
+  const lat = pick('lat', 'latitude');
+  const lng = pick('lng', 'lon', 'long', 'longitude');
+  const hasCoordinates = lat !== undefined && lng !== undefined && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+  const link = hasCoordinates
+    ? `https://www.google.com/maps?q=${lat},${lng}`
+    : location.href && /^https?:\/\//.test(location.href)
+      ? location.href
+      : '';
+  const label = location.title || location.description || 'Vị trí được chia sẻ (shared location)';
+  const details = location.description && location.description !== label ? `\n${location.description}` : '';
+  const text = `📍 ${label}${details}${link ? `\n${link}` : ''}`;
+  return hasCoordinates ? { kind: 'location', latitude: lat, longitude: lng, label, text } : { kind: 'text', text };
 }
 
 /**

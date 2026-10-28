@@ -20,8 +20,9 @@ export type MediaResult = {
 const FETCH_TIMEOUT_MS = 30_000;
 // Media URLs come from message payloads (contact-influenced input) — restrict
 // to Zalo CDN hosts over https to close SSRF toward localhost/LAN.
-// dlmd.me / dlfl.vn are Zalo's signed video / file download CDNs.
-const ALLOWED_HOST_SUFFIXES = ['.zdn.vn', '.zadn.vn', '.dlmd.me', '.dlfl.vn'];
+// dlmd.me / dlfl.vn are Zalo's signed video / file download CDNs; they 301 to
+// mdchat.me / flchat.vn (then 302 to an edge node there), so both must be allowed.
+const ALLOWED_HOST_SUFFIXES = ['.zdn.vn', '.zadn.vn', '.dlmd.me', '.dlfl.vn', '.mdchat.me', '.flchat.vn'];
 
 /** Downloaded bytes plus the server-declared mimetype (parameters stripped). */
 export type FetchedMedia = {
@@ -236,10 +237,12 @@ export async function bridgeInboundPhoto(
   const { buffer, mimetype } = await fetchMediaCapped(photo.url, maxBytes);
   const extension = mimetype.split('/')[1]?.split(';')[0] ?? 'jpg';
   const mxcUrl = await intent.uploadContent(buffer, { type: mimetype, name: `zalo-photo.${extension}` });
-  // MSC2530 caption: body = caption, filename = the actual file name (kept distinct)
+  // MSC2530 caption: body = caption, filename = the actual file name. filename is always
+  // set so a caption-less photo (body === filename) shows no caption instead of the name
   const content: Record<string, unknown> = {
     msgtype: 'm.image',
     body: photo.caption || `zalo-photo.${extension}`,
+    filename: `zalo-photo.${extension}`,
     url: mxcUrl,
     info: {
       mimetype,
@@ -248,7 +251,6 @@ export async function bridgeInboundPhoto(
       ...(photo.height ? { h: photo.height } : {}),
     },
   };
-  if (photo.caption) content.filename = `zalo-photo.${extension}`;
   Object.assign(content, extra);
   const { event_id } = await intent.sendMessage(roomId, content);
   return { eventId: event_id };

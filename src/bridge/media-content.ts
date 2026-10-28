@@ -10,6 +10,8 @@ export type MediaKind = 'image' | 'sticker' | 'video' | 'file' | 'audio';
 
 /** Videos and documents routinely exceed the photo cap; Beeper accepts uploads this big */
 export const LARGE_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
+/** Whole-download timeout for videos / documents: 100 MB needs far more than the 30 s photo timeout */
+export const LARGE_MEDIA_TIMEOUT_MS = 180_000;
 
 /** A Zalo attachment: where it may be downloaded from plus what Matrix wants to know. */
 export type MediaDescriptor = {
@@ -102,8 +104,10 @@ export async function fetchFirstMedia(
     try {
       const { buffer, mimetype } = await fetchMediaCapped(url, maxBytes, timeoutMs);
       return { buffer, mimetype: sniffMimetype(buffer, mimetype) };
-    } catch {
-      // expired / dead host → next candidate
+    } catch (err) {
+      // expired / dead host → next candidate. Log the host only: the path is a signed token
+      const host = URL.canParse(url) ? new URL(url).hostname : 'invalid-url';
+      console.warn(`[media] download from ${host} failed: ${err instanceof Error ? err.message : err}`);
     }
   }
   return null;
@@ -166,9 +170,9 @@ export async function buildMediaEvent(
   };
   if (media.kind === 'sticker') return { type: 'm.sticker', content: { body: 'sticker', url: mxcUrl, info }, mxcUrl };
   const msgtype = { image: 'm.image', video: 'm.video', file: 'm.file', audio: 'm.audio' }[media.kind];
-  // MSC2530 caption: body = caption, filename = the actual file name (kept distinct)
-  const content: Record<string, unknown> = { msgtype, body: media.caption || filename, url: mxcUrl, info };
-  if (media.caption || media.kind === 'file') content.filename = filename;
+  // MSC2530 caption: body = caption, filename = the actual file name. Always set so a
+  // caption-less attachment (body === filename) shows no caption instead of the name
+  const content: Record<string, unknown> = { msgtype, body: media.caption || filename, filename, url: mxcUrl, info };
   if (media.kind === 'audio') {
     // MSC1767 audio: duration in ms + waveform (MSC3246: values 0–1024) for the voice bubble
     content['org.matrix.msc1767.audio'] = {

@@ -9,6 +9,8 @@ export type ZaloContent =
   /** system-style line posted as m.notice (e.g. a call log bubble) */
   | { kind: 'notice'; text: string }
   | { kind: 'photo'; url: string; thumbUrl?: string; width?: number; height?: number; caption?: string }
+  /** shared location → m.location; `text` is the fallback body (label, address, maps link) */
+  | { kind: 'location'; latitude: number; longitude: number; label: string; text: string }
   | { kind: 'sticker'; id: number; catId: number }
   /** video / file / voice / GIF / doodle — rendered by bridge/media-content.ts */
   | { kind: 'media'; media: MediaDescriptor }

@@ -206,4 +206,24 @@ describe('media URL guard', () => {
     expect(fetchMock.mock.calls[1]![0]).toBe('https://f2.zadn.vn/b.jpg');
     fetchMock.mockRestore();
   });
+
+  it('follows the video / file CDN hand-off (dlmd.me → mdchat.me, dlfl.vn → flchat.vn)', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(null, { status: 301, headers: { location: 'https://file-stal-22.flchat.vn/gr/a/b' } }),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://file-stal-22-te-vnso-ne-1.flchat.vn/gr/a/b' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(Buffer.from('%PDF-1.7'), { headers: { 'content-type': 'application/pdf' } }));
+    const media = await fetchMediaCapped('https://file-stal-22.dlfl.vn/gr/a/b', 1000);
+    expect(media.mimetype).toBe('application/pdf');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    fetchMock.mockRestore();
+    expect(() => assertZaloMediaUrl('https://video-stal-15-te-vnso-cm-15.mdchat.me/gr/a/b')).not.toThrow();
+  });
 });

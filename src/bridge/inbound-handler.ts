@@ -3,7 +3,13 @@
 // would otherwise interleave async sends within one conversation).
 import type { Bridge } from 'matrix-appservice-bridge';
 import type { EchoSuppressor } from './echo-suppressor.ts';
-import { buildLinkPreview, buildMediaEvent, fetchFirstMedia, LARGE_MEDIA_MAX_BYTES } from './media-content.ts';
+import {
+  buildLinkPreview,
+  buildMediaEvent,
+  fetchFirstMedia,
+  LARGE_MEDIA_MAX_BYTES,
+  LARGE_MEDIA_TIMEOUT_MS,
+} from './media-content.ts';
 import { bridgeInboundPhoto, bridgeInboundSticker } from './media-handler.ts';
 import { buildInboundMentions } from './mentions.ts';
 import { SELF_BRIDGE_MARKER } from './outbound-handler.ts';
@@ -189,13 +195,31 @@ export class InboundHandler {
           );
           eventId = bridged.eventId;
         } catch (err) {
+          // Keep the caption (e.g. a contact card's name / phone) even when the image is lost
+          const caption = msg.content.caption ? `${msg.content.caption}\n` : '';
           const sent = await intent.sendMessage(portal.room_id, {
             msgtype: 'm.notice',
-            body: `[Zalo photo could not be bridged: ${(err as Error).message}]`,
+            body: `${caption}[Zalo photo could not be bridged: ${(err as Error).message}]`,
             ...extraContent,
           });
           eventId = sent.event_id;
         }
+        break;
+      }
+      case 'location': {
+        // Native location: clients draw a map preview and open the device's default maps app
+        const { latitude, longitude, label, text } = msg.content;
+        const geoUri = `geo:${latitude},${longitude}`;
+        const sent = await intent.sendMessage(portal.room_id, {
+          msgtype: 'm.location',
+          body: text,
+          geo_uri: geoUri,
+          'org.matrix.msc3488.location': { uri: geoUri, description: label },
+          'org.matrix.msc3488.asset': { type: 'm.pin' },
+          'org.matrix.msc1767.text': text,
+          ...extraContent,
+        });
+        eventId = sent.event_id;
         break;
       }
       case 'sticker': {
@@ -224,11 +248,9 @@ export class InboundHandler {
       case 'media': {
         const media = msg.content.media;
         // Videos and documents are routinely bigger than the photo cap
-        const maxBytes =
-          media.kind === 'video' || media.kind === 'file'
-            ? Math.max(this.deps.mediaMaxBytes, LARGE_MEDIA_MAX_BYTES)
-            : this.deps.mediaMaxBytes;
-        const bytes = await fetchFirstMedia(media.urls, maxBytes);
+        const isLarge = media.kind === 'video' || media.kind === 'file';
+        const maxBytes = isLarge ? Math.max(this.deps.mediaMaxBytes, LARGE_MEDIA_MAX_BYTES) : this.deps.mediaMaxBytes;
+        const bytes = await fetchFirstMedia(media.urls, maxBytes, isLarge ? LARGE_MEDIA_TIMEOUT_MS : undefined);
         if (bytes) {
           /** Uploads the media bytes as the posting intent; returns the mxc:// URI. */
           const upload = (buffer: Buffer, uploadOptions: { type: string; name: string }) =>
@@ -250,6 +272,12 @@ export class InboundHandler {
         break;
       }
       case 'unsupported': {
+        // Field NAMES only (never values — private content) so the shape can be added later
+        const raw = msg.quotable?.content;
+        if (msg.content.msgType !== 'e2ee') {
+          const keys = raw && typeof raw === 'object' ? Object.keys(raw).join(',') : typeof raw;
+          console.warn(`[bridge] unsupported Zalo msgType ${msg.content.msgType} (content keys: ${keys})`);
+        }
         const sent = await intent.sendMessage(portal.room_id, {
           msgtype: 'm.notice',
           body:

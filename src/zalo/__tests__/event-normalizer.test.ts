@@ -105,6 +105,109 @@ describe('normalizeZaloMessage', () => {
     expect(normalized?.content).toEqual({ kind: 'unsupported', msgType: 'chat.todo' });
   });
 
+  it('renders a shared location as a native location with a text fallback', () => {
+    const contentOf = (content: unknown) =>
+      normalizeZaloMessage({ ...dmText, data: { ...dmText.data, msgType: 'chat.location.new', content } })?.content;
+    // Live shapes (anonymized): a picked place, and "my location" (empty title)
+    const place = { title: 'Nhà Thuốc A', description: '1 Lê Lợi, Huế', href: '', thumb: '', action: '' };
+    expect(
+      contentOf({
+        ...place,
+        params: '{"isUserLocation":0,"srcId":"x","latitude":16.457905199999999,"longitude":107.5874197}',
+      }),
+    ).toEqual({
+      kind: 'location',
+      latitude: 16.4579052,
+      longitude: 107.5874197,
+      label: 'Nhà Thuốc A',
+      text: '📍 Nhà Thuốc A\n1 Lê Lợi, Huế\nhttps://www.google.com/maps?q=16.4579052,107.5874197',
+    });
+    expect(
+      contentOf({ ...place, title: '', params: '{"isUserLocation":1,"latitude":16.45,"longitude":107.58}' }),
+    ).toMatchObject({
+      kind: 'location',
+      label: '1 Lê Lợi, Huế',
+      text: '📍 1 Lê Lợi, Huế\nhttps://www.google.com/maps?q=16.45,107.58',
+    });
+    // Other key spellings
+    expect(contentOf({ title: 'Landmark 81', params: '{"lat":10.795,"lng":106.722}' })).toMatchObject({
+      kind: 'location',
+      latitude: 10.795,
+      longitude: 106.722,
+    });
+    expect(contentOf({ title: 'Nhà', latitude: '21.03', longitude: '105.85' })).toMatchObject({ kind: 'location' });
+    // No coordinates → text only
+    expect(contentOf({ description: 'Quận 1' })).toEqual({ kind: 'text', text: '📍 Quận 1' });
+  });
+
+  it('renders a contact card (danh thiếp) as its QR code captioned with name, phone and a Zalo link', () => {
+    const contentOf = (content: unknown) =>
+      normalizeZaloMessage({ ...dmText, data: { ...dmText.data, msgType: 'chat.recommended', content } })?.content;
+    // Live shape (anonymized): href is a placeholder, description is JSON
+    const card = {
+      title: 'Nguyễn Văn A',
+      description: '{"phone":"0900000000","qrCodeUrl":"https:\/\/qr-talk.zdn.vn\/2\/1\/a.jpg"}',
+      href: 'www.zaloapp.com',
+      thumb: 'https://s120.avatar.talk.zdn.vn/a.jpg',
+      action: 'recommened.user',
+      params: '1234567890',
+    };
+    expect(contentOf(card)).toEqual({
+      kind: 'photo',
+      url: 'https://qr-talk.zdn.vn/2/1/a.jpg',
+      caption: '👤 Danh thiếp Zalo: Nguyễn Văn A\n📞 0900000000\nMở trong Zalo: https://zalo.me/0900000000',
+    });
+    // Phone hidden by the contact's privacy settings: the QR is the way in
+    expect(contentOf({ ...card, description: '{"qrCodeUrl":"https://qr-talk.zdn.vn/a.jpg"}' })).toEqual({
+      kind: 'photo',
+      url: 'https://qr-talk.zdn.vn/a.jpg',
+      caption: '👤 Danh thiếp Zalo: Nguyễn Văn A\n(quét QR bằng Zalo để mở)',
+    });
+    // No QR: text with the avatar as link preview
+    expect(contentOf({ ...card, description: '{"phone":"0900000000"}' })).toEqual({
+      kind: 'text',
+      text: '👤 Danh thiếp Zalo: Nguyễn Văn A\n📞 0900000000\nMở trong Zalo: https://zalo.me/0900000000',
+      linkPreview: {
+        url: 'https://zalo.me/0900000000',
+        title: 'Nguyễn Văn A',
+        imageUrl: 'https://s120.avatar.talk.zdn.vn/a.jpg',
+      },
+    });
+    expect(contentOf({ ...card, description: '{}' })).toEqual({
+      kind: 'text',
+      text: '👤 Danh thiếp Zalo: Nguyễn Văn A',
+    });
+  });
+
+  it('does not use a photo file name as its caption', () => {
+    const contentOf = (title: string, description = '') =>
+      normalizeZaloMessage({
+        ...dmText,
+        data: {
+          ...dmText.data,
+          msgType: 'chat.photo',
+          content: { href: 'https://f1.zdn.vn/a.jpg', title, description },
+        },
+      })?.content;
+    expect(contentOf('IMG_0012.JPG')).toMatchObject({ kind: 'photo', caption: undefined });
+    expect(contentOf('', 'Screenshot_2026-10-28.png')).toMatchObject({ caption: undefined });
+    expect(contentOf('Ảnh đẹp quá')).toMatchObject({ caption: 'Ảnh đẹp quá' });
+  });
+
+  it('renders web cards as text (with an href they become link cards)', () => {
+    const contentOf = (msgType: string, content: unknown) =>
+      normalizeZaloMessage({ ...dmText, data: { ...dmText.data, msgType, content } })?.content;
+    expect(contentOf('chat.webcontent', { title: 'Chuyển khoản', description: '500.000đ' })).toEqual({
+      kind: 'text',
+      text: 'Chuyển khoản\n500.000đ',
+    });
+    expect(contentOf('chat.webcontent.v2', {})).toEqual({ kind: 'text', text: '[Zalo web card — open Zalo to view]' });
+    expect(contentOf('chat.webcontent', { title: 'Mini app', href: 'https://zalo.me/s/123' })).toMatchObject({
+      kind: 'text',
+      text: 'Mini app\nhttps://zalo.me/s/123',
+    });
+  });
+
   it('normalizes video / file / voice / GIF attachments to media descriptors', () => {
     /** Normalizes a DM fixture with the given msgType/content and returns only its content. */
     const contentOf = (msgType: string, content: unknown) =>
