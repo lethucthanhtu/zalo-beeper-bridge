@@ -137,6 +137,14 @@ Send these to the bridge bot in its management chat (owner only):
 
 Zalo Web (and therefore the live bridge) cannot fetch messages from before the session started. The history importer fills Beeper from **Zalo PC's local message store** instead, optionally enriched with media from a **Zalo PC backup** (`.zl.zip`). Each chat is rebuilt as a new Beeper room with the complete history in order; the bridge is then pointed at the new room and the old one is deleted — only after the new room has been verified.
 
+### Quick start (Windows, one command)
+
+```powershell
+pwsh scripts/zalo-pc/import.ps1
+```
+
+It checks the bridge and Beeper, (re)starts Zalo PC with the local debug port (asks before closing it), lists your chats **by name** and lets you pick them (`1,3,5-8`, `groups`, `dms` or `all`), then runs Step 3 below and prints an OK / FAIL summary. Re-running skips chats already done. Options: `-Chats g123,4567` (no picker), `-MediaDir /data/import-media` (backup media from Step 2), `-OwnUid <uid>`. Exports land in `work/` (gitignored — it holds your messages). The sections below describe what it automates.
+
 ### What gets imported, and how it looks
 
 Imported messages are rendered exactly like live ones (`src/bridge/media-content.ts` is shared):

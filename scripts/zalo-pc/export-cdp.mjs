@@ -2,8 +2,8 @@
 // Output: <outDir>/conversations.json + <outDir>/<threadKey>.ndjson (one raw Core.Message
 // row per line, oldest first). threadKey = "g<groupId>" for groups, the peer uid for DMs.
 //
-// Usage: node scripts/zalo-pc/export-cdp.mjs <outDir> [threadKey1,threadKey2,...]
-//   (no key list = every conversation Zalo PC knows)
+// Usage: node scripts/zalo-pc/export-cdp.mjs <outDir> [threadKey1,threadKey2,... | --list]
+//   (no key list = every conversation Zalo PC knows; --list = conversations.json only)
 import fs from 'node:fs';
 import path from 'node:path';
 import { connectZaloPc, PRELUDE } from './cdp.mjs';
@@ -33,6 +33,10 @@ fs.writeFileSync(path.join(outDir, 'conversations.json'), JSON.stringify(convers
 console.log(
   `conversations: ${conversationMeta.convs.length}, groups named: ${Object.keys(conversationMeta.gmap).length}, friends named: ${Object.keys(conversationMeta.fmap).length}`,
 );
+if (onlyKeysArg === '--list') {
+  close();
+  process.exit(0);
+}
 
 // Fields the importer uses (the rest of a Core.Message row is UI state)
 const KEEP = [

@@ -29,3 +29,6 @@ graphify-out/
 
 # archify diagram output
 .archify/
+
+# history import working dir: exported chats (private messages) — never commit
+work/
