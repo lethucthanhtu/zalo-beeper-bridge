@@ -51,6 +51,35 @@ Only messages **you sent from Beeper** can be recalled (Zalo only lets you recal
 - `launchctl list | grep beeper-zalo` shows a non-zero exit code.
 - Check `logs/bridge.log` for the stack. Common causes: `config.yaml` missing/invalid (copy from `config.yaml.example`), wrong Node path in the plist (update after an nvm upgrade), or `registration.yaml` missing (`bbctl register sh-zalo`).
 
+## Rolling back a deploy (container)
+
+Before each risky deploy, keep three things (the multi-account deploy of 2026-10-28 kept `localhost/zalo-beeper-bridge:rollback-pre-v7`, git tag `rollback/pre-multi-account`, and `/data/bridge.db.bak-pre-v7`):
+
+```bash
+podman tag "$(podman inspect zalo-beeper-bridge --format '{{.Image}}')" localhost/zalo-beeper-bridge:rollback-<name>
+git tag -a rollback/<name> -m "last deployed state"
+podman exec zalo-beeper-bridge node -e "new (require('/app/node_modules/better-sqlite3'))('/data/bridge.db',{readonly:true}).backup('/data/bridge.db.bak-<name>')"
+podman exec zalo-beeper-bridge chmod 600 /data/bridge.db.bak-<name>
+```
+
+**Roll back the code** (normal case — the database stays as it is):
+
+```bash
+podman tag localhost/zalo-beeper-bridge:rollback-<name> localhost/zalo-beeper-bridge:latest
+podman compose up -d --no-build --force-recreate
+git switch --detach rollback/<name>   # so the next build does not bring the change back
+```
+
+Schema migrations are additive, so older code runs on a newer database. Verified for v7 → v6 on a copy of the live database: the v6 code reads and writes normally, and its new rows simply have no `account_id` until the newer code runs again. On the next start the older code also re-sends each portal's `m.bridge` state without `fi.mau.receiver`.
+
+**Restore the database** (only if it is damaged — messages bridged since the backup lose their mapping, so replies/reactions to them stop working):
+
+```bash
+podman compose stop
+podman run --rm -v zalo-beeper-bridge_zalo-data:/data --entrypoint sh localhost/zalo-beeper-bridge:latest   -c 'cd /data && rm -f bridge.db-wal bridge.db-shm && cp bridge.db bridge.db.broken && cp bridge.db.bak-<name> bridge.db'
+podman compose up -d
+```
+
 ## Upgrading zca-js
 
 Zalo Web changes can break zca-js. When bumping the pinned version: `npm test` (normalizer fixtures), then a manual smoke test (send/receive text + image). All zca-js usage is isolated in `src/zalo/zalo-client.ts`.
