@@ -32,3 +32,5 @@ graphify-out/
 
 # history import working dir: exported chats (private messages) — never commit
 work/
+# second bridge config dirs (see README "Multiple Zalo accounts")
+container-config-*/

@@ -8,26 +8,31 @@ It also ships a **history importer** that moves your full Zalo history (from Zal
 
 ## Features
 
-| Area                             |                      Zalo → Beeper                       |                Beeper → Zalo                |
-| -------------------------------- | :------------------------------------------------------: | :-----------------------------------------: |
-| Text (DM + group)                |                            ✅                            |                     ✅                      |
-| @mentions                        |                        ✅ (pills)                        |                     ✅                      |
-| Replies / quotes                 |                            ✅                            |                     ✅                      |
-| Photos                           |                            ✅                            |                     ✅                      |
-| Stickers                         | ✅ animated (`m.sticker`, WebP built from Zalo's sprite) |                      —                      |
-| GIFs                             |                            ✅                            |                      —                      |
-| Videos                           |                      ✅ (`m.video`)                      |                     ✅                      |
-| Files                            |                      ✅ (`m.file`)                       |                     ✅                      |
-| Voice messages                   |                ✅ (`m.audio` voice note)                 |             ✅ (sent as a file)             |
-| Link cards                       |              ✅ text + Beeper link preview               |                      —                      |
-| Reactions                        |                            ✅                            |                     ✅                      |
-| Message recall                   |                            —                             |                     ✅                      |
-| Read receipts                    |                            ✅                            |                     ✅                      |
-| Typing indicators                |                            ✅                            | disabled (handler kept, see `src/index.ts`) |
-| Own messages sent from the phone |                   ✅ (double-puppeted)                   |                     n/a                     |
-| End-to-end encrypted Zalo chats  |            notice only (cannot be decrypted)             |                      —                      |
+| Area                             |                       Zalo → Beeper                        |                Beeper → Zalo                |
+| -------------------------------- | :--------------------------------------------------------: | :-----------------------------------------: |
+| Text (DM + group)                |                             ✅                             |                     ✅                      |
+| @mentions                        |                         ✅ (pills)                         |                     ✅                      |
+| Replies / quotes                 |                             ✅                             |                     ✅                      |
+| Photos                           |                             ✅                             |                     ✅                      |
+| Stickers                         |  ✅ animated (`m.sticker`, WebP built from Zalo's sprite)  |                      —                      |
+| GIFs                             |                             ✅                             |                      —                      |
+| Videos                           |                       ✅ (`m.video`)                       |                     ✅                      |
+| Files                            |                       ✅ (`m.file`)                        |                     ✅                      |
+| Voice messages                   |                 ✅ (`m.audio` voice note)                  |             ✅ (sent as a file)             |
+| Link cards                       |               ✅ text + Beeper link preview                |                      —                      |
+| Locations                        | ✅ `m.location` (map preview, opens the device's maps app) |                      —                      |
+| Contact cards (danh thiếp)       |       ✅ QR code + name, phone and a `zalo.me` link        |                      —                      |
+| Web cards (`chat.webcontent`)    |               ✅ text (title + description)                |                      —                      |
+| Reactions                        |                             ✅                             |                     ✅                      |
+| Message recall                   |                             —                              |                     ✅                      |
+| Read receipts                    |                             ✅                             |                     ✅                      |
+| Typing indicators                |                             ✅                             | disabled (handler kept, see `src/index.ts`) |
+| Own messages sent from the phone |                    ✅ (double-puppeted)                    |                     n/a                     |
+| End-to-end encrypted Zalo chats  |             notice only (cannot be decrypted)              |                      —                      |
 
-Live videos / files / voice / GIFs and link previews share their rendering with the history importer, where it was verified on real chats; for live messages they are covered by unit tests of the payload parsing.
+Live videos / files / voice / GIFs and link previews share their rendering with the history importer, where it was verified on real chats; for live messages they are covered by unit tests of the payload parsing. Locations and contact cards are parsed from captured live payloads; the `chat.webcontent` shape is not confirmed yet — unknown message types log their field **names** (never values) so they can be added.
+
+Photos without a caption show no caption (the file name is never used as one). A contact card shows the contact's QR code with name and phone; the `zalo.me/<phone>` link opens the Zalo app on a phone (no link when the contact hides the number — scan the QR instead).
 
 Plus: ghost users with real names + avatars, portal rooms auto-created on first message, a `sync` command for pinned conversations and groups, Zalo network branding (name + logo), listener auto-reconnect with ban-suspicion pause, conservative outbound rate limiting, encrypted credential storage at rest, and the [history importer](#importing-zalo-history).
 
@@ -40,7 +45,7 @@ Plus: ghost users with real names + avatars, portal rooms auto-created on first 
 - A Beeper account and [`bbctl`](https://github.com/beeper/bridge-manager)
 - `ffmpeg` and Python 3 (bbctl prerequisites)
 - A Zalo account you can log in to by scanning a QR code
-- For the history importer: Zalo PC (Windows/macOS desktop app), optionally a Zalo PC backup file
+- For the history importer: Zalo PC (Windows/macOS desktop app), optionally a Zalo PC backup file; on Windows PowerShell 7 and Git for Windows (for the one-command import script)
 
 ## Setup
 
@@ -119,6 +124,30 @@ login
 
 Scan the QR image it posts with the Zalo app on your phone and confirm. Once you see the listener connect, message the account from another Zalo user and the chat appears in Beeper.
 
+### Multiple Zalo accounts
+
+One bridge bridges one Zalo account. For a second account, run a **second bridge** next to the first (single-bridge multi-login is in preparation):
+
+1. Register it under another name — the ghost users, the bot and the namespace follow the name (`sh-zalo2` → bot `@sh-zalo2bot`, ghosts `@sh-zalo2_<uid>`), and the bridge picks them up from the registration automatically:
+   ```bash
+   bbctl register -o registration.yaml sh-zalo2
+   ```
+2. Give it its own config dir (`container-config-2/` with that `registration.yaml`, a `config.yaml` and `bbctl-config.json`) and its own data volume — add a second service to `compose.yaml`:
+   ```yaml
+   zalo-bridge-2:
+     image: localhost/zalo-beeper-bridge:latest
+     container_name: zalo-beeper-bridge-2
+     restart: unless-stopped
+     init: false
+     volumes:
+       - ./container-config-2:/config:ro
+       - zalo-data-2:/data
+   # and under volumes:  zalo-data-2:
+   ```
+3. `podman compose up -d`, then send `login` to `@sh-zalo2bot:beeper.local`.
+
+Beeper shows it as a separate network; a contact you know from both accounts gets one ghost per bridge. Never run two bridges with the **same** registration (Beeper disconnects the first one). Not yet verified end-to-end with two live accounts.
+
 > **Single-listener constraint:** Zalo Web allows only one active session. If you open Zalo Web in a browser while the bridge runs, the bridge listener is kicked. Use the phone app (and Zalo PC) alongside the bridge, not Zalo Web.
 
 ## Bot commands
@@ -137,13 +166,37 @@ Send these to the bridge bot in its management chat (owner only):
 
 Zalo Web (and therefore the live bridge) cannot fetch messages from before the session started. The history importer fills Beeper from **Zalo PC's local message store** instead, optionally enriched with media from a **Zalo PC backup** (`.zl.zip`). Each chat is rebuilt as a new Beeper room with the complete history in order; the bridge is then pointed at the new room and the old one is deleted — only after the new room has been verified.
 
-### Quick start (Windows, one command)
+### Quick start (one command)
 
 ```powershell
+# Windows (PowerShell 7 + Git for Windows)
 pwsh scripts/zalo-pc/import.ps1
 ```
 
-It checks the bridge and Beeper, (re)starts Zalo PC with the local debug port (asks before closing it), lists your chats **by name** and lets you pick them (`1,3,5-8`, `groups`, `dms` or `all`), then runs Step 3 below and prints an OK / FAIL summary. Re-running skips chats already done. Options: `-Chats g123,4567` (no picker), `-MediaDir /data/import-media` (backup media from Step 2), `-OwnUid <uid>`. Exports land in `work/` (gitignored — it holds your messages). The sections below describe what it automates.
+```bash
+# macOS (Zalo PC installed in /Applications)
+scripts/zalo-pc/import.sh
+```
+
+Both scripts:
+
+1. check the bridge container, Beeper, `node` (and Git Bash on Windows);
+2. (re)start Zalo PC with the local debug port — they **ask before closing** a running Zalo PC;
+3. list your chats **by name** (pinned first, then by message count) and let you pick them: `1,3,5-8`, `groups`, `dms` or `all`;
+4. run [Step 3](#step-3--export-and-import) chat by chat with live progress, then print an OK / FAIL summary.
+
+Re-running skips chats already done. Exports, `run.log` and `done.txt` land in `work/` (gitignored — it holds your messages).
+
+| Option                   | Windows (`import.ps1`)                | macOS (`import.sh`)     |
+| ------------------------ | ------------------------------------- | ----------------------- |
+| Chats, no picker         | `-Chats g123,4567`                    | `-c g123,4567`          |
+| Backup media (Step 2)    | `-MediaDir /data/import-media`        | `-m /data/import-media` |
+| Your Zalo uid            | `-OwnUid <uid>` (default: bridge log) | `-u <uid>`              |
+| Container name           | `-Container <name>`                   | `-n <name>`             |
+| Docker instead of Podman | `-ContainerCli docker`                | `-r docker`             |
+| Work dir                 | `-WorkDir <dir>`                      | `-w <dir>`              |
+
+On macOS, set `ZALO_APP=/path/to/Zalo.app` if Zalo PC is not in `/Applications`. Start with one chat (`-Chats` / `-c`) to check that everything works before importing all. The sections below describe what the scripts automate.
 
 ### What gets imported, and how it looks
 
@@ -174,7 +227,13 @@ Other behaviour worth knowing:
 The tools read Zalo PC's own (already decrypted) data over the Chrome DevTools Protocol on `127.0.0.1` only. Quit Zalo PC completely, then start it with:
 
 ```powershell
+# Windows
 & "$env:LOCALAPPDATA\Programs\Zalo\Zalo-<version>\Zalo.exe" --remote-debugging-port=9229
+```
+
+```bash
+# macOS
+open -a Zalo --args --remote-debugging-port=9229
 ```
 
 Only what Zalo PC holds locally can be imported: the more history Zalo PC has, the more ends up in Beeper.
@@ -297,6 +356,7 @@ podman run --rm -v "$PWD:/w" -w /w docker.io/library/node:24-bookworm-slim npm i
 
 - Zalo session credentials are stored **AES-256-GCM encrypted** at rest (`src/zalo/credential-store.ts`), with the key in a sibling `0600` file. Never commit `zalo-creds.*`, `config.yaml`, `registration.yaml`, or `bridge.db` — they are gitignored.
 - The bridge runs entirely on your machine; message content is only ever sent to Beeper (your homeserver) and Zalo.
+- Media is only downloaded over https from Zalo's CDN hosts (`zdn.vn`, `zadn.vn`, and the video/file CDNs `dlmd.me`/`mdchat.me`, `dlfl.vn`/`flchat.vn`), re-checked on every redirect hop. Logs carry ids and hosts only — never message content or signed media links.
 - Outbound traffic is rate-limited and the listener pauses on ban-suspicion signals to reduce risk to the account.
 - **History import:** the Zalo PC debug port listens on `127.0.0.1` only, but any local program can read your messages through it while it is open — restart Zalo PC normally when done. The backup key (`get-uin.mjs`) decrypts every backup of the account: keep it in a private file and delete it after use. Extracted backups and prepared media contain your full history and media in clear text — delete `work/` (and `/data/import-*` in the container) after importing.
 

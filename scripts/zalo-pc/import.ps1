@@ -15,6 +15,7 @@
   pwsh scripts/zalo-pc/import.ps1                       # interactive picker
   pwsh scripts/zalo-pc/import.ps1 -Chats g123,4567     # given thread keys, no picker
   pwsh scripts/zalo-pc/import.ps1 -MediaDir /data/import-media   # with backup media (README step 2)
+  pwsh scripts/zalo-pc/import.ps1 -ContainerCli docker
 #>
 param(
   # Thread keys to import ("g<groupId>" or a DM peer uid); omit to pick interactively
@@ -26,6 +27,8 @@ param(
   # Backup media folder INSIDE the container (see README "Step 2"), optional
   [string]$MediaDir,
   [string]$Container = 'zalo-beeper-bridge',
+  # Container runtime: podman (default) or docker
+  [ValidateSet('podman', 'docker')][string]$ContainerCli = 'podman',
   [int]$CdpPort = 9229
 )
 $ErrorActionPreference = 'Stop'
@@ -38,23 +41,23 @@ function Fail($text) { Write-Host "✖ $text" -ForegroundColor Red; exit 1 }
 function Test-Url($url) { try { Invoke-WebRequest $url -TimeoutSec 10 -UseBasicParsing | Out-Null; $true } catch { $false } }
 
 # --- 1. preflight -------------------------------------------------------------
-Step 'Kiểm tra môi trường'
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Fail 'Không tìm thấy node trong PATH.' }
-if (-not (Get-Command podman -ErrorAction SilentlyContinue)) { Fail 'Không tìm thấy podman trong PATH.' }
-$state = podman ps --filter "name=^$Container$" --format '{{.Status}}'
-if (-not $state) { Fail "Container $Container không chạy — chạy 'podman compose up -d' trước." }
+Step 'Preflight checks'
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Fail 'node not found in PATH.' }
+if (-not (Get-Command $ContainerCli -ErrorAction SilentlyContinue)) { Fail "$ContainerCli not found in PATH." }
+$state = & $ContainerCli ps --filter "name=^$Container$" --format '{{.Status}}'
+if (-not $state) { Fail "Container $Container is not running — run '$ContainerCli compose up -d' first." }
 Write-Host "  bridge: $state"
-if (-not (Test-Url 'https://matrix.beeper.com/_matrix/client/versions')) { Fail 'Không kết nối được Beeper.' }
-# migrate-all.sh is bash: use Git for Windows' bash (WSL bash cannot see podman/node from Windows)
+if (-not (Test-Url 'https://matrix.beeper.com/_matrix/client/versions')) { Fail 'Cannot reach Beeper (matrix.beeper.com).' }
+# migrate-all.sh is bash: use Git for Windows' bash (WSL bash cannot see the Windows podman/docker/node)
 $git = (Get-Command git -ErrorAction SilentlyContinue).Source
 $bash = if ($git) { Join-Path (Split-Path (Split-Path $git)) 'bin\bash.exe' }
-if (-not $bash -or -not (Test-Path $bash)) { Fail 'Không tìm thấy Git Bash (cài Git for Windows).' }
+if (-not $bash -or -not (Test-Path $bash)) { Fail 'Git Bash not found (install Git for Windows).' }
 
 if (-not $OwnUid) {
-  $OwnUid = (podman logs $Container 2>&1 | Select-String 'uid (\d+)' | Select-Object -Last 1).Matches.Groups[1].Value
-  if (-not $OwnUid) { Fail 'Không đọc được Zalo uid từ log bridge — truyền -OwnUid <uid>.' }
+  $OwnUid = (& $ContainerCli logs $Container 2>&1 | Select-String 'uid (\d+)' | Select-Object -Last 1).Matches.Groups[1].Value
+  if (-not $OwnUid) { Fail 'Could not read your Zalo uid from the bridge log — pass -OwnUid <uid>.' }
 }
-Write-Host "  Zalo uid của bridge: $OwnUid (Zalo PC phải đăng nhập CÙNG account này)"
+Write-Host "  bridge Zalo uid: $OwnUid (Zalo PC must be logged in to the SAME account)"
 
 # --- 2. Zalo PC with the debug port ------------------------------------------------
 Step 'Zalo PC'
@@ -63,43 +66,43 @@ if (-not (Test-Url $cdpUrl)) {
   $exe = Get-ChildItem $zaloRoot -Directory -Filter 'Zalo-*' -ErrorAction SilentlyContinue |
     Sort-Object { [version]($_.Name -replace '^Zalo-', '') } -Descending |
     ForEach-Object { Join-Path $_.FullName 'Zalo.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
-  if (-not $exe) { Fail "Không tìm thấy Zalo.exe trong $zaloRoot." }
+  if (-not $exe) { Fail "Zalo.exe not found under $zaloRoot." }
   if (Get-Process Zalo -ErrorAction SilentlyContinue) {
-    $answer = Read-Host '  Zalo PC đang chạy KHÔNG có debug port. Đóng và mở lại? (y/N)'
-    if ($answer -notmatch '^[yY]') { Fail 'Đã huỷ. Tự mở lại Zalo PC với --remote-debugging-port=9229 rồi chạy lại.' }
+    $answer = Read-Host '  Zalo PC is running WITHOUT the debug port. Close and restart it? (y/N)'
+    if ($answer -notmatch '^[yY]') { Fail 'Cancelled. Restart Zalo PC with --remote-debugging-port=9229 yourself, then re-run.' }
     Get-Process Zalo | Stop-Process -Force
     Start-Sleep -Seconds 3
   }
   Start-Process $exe -ArgumentList "--remote-debugging-port=$CdpPort"
-  Write-Host '  Đang chờ Zalo PC khởi động (đăng nhập nếu được hỏi)...'
+  Write-Host '  Waiting for Zalo PC to start (log in if it asks)...'
   $deadline = (Get-Date).AddMinutes(3)
   while (-not (Test-Url $cdpUrl)) {
-    if ((Get-Date) -gt $deadline) { Fail 'Zalo PC không mở debug port sau 3 phút.' }
+    if ((Get-Date) -gt $deadline) { Fail 'Zalo PC did not open the debug port within 3 minutes.' }
     Start-Sleep -Seconds 3
   }
 }
-Write-Host "  Zalo PC sẵn sàng trên 127.0.0.1:$CdpPort (chỉ máy này truy cập được)"
+Write-Host "  Zalo PC ready on 127.0.0.1:$CdpPort (reachable from this machine only)"
 
 # --- 3. pick chats -------------------------------------------------------------
 $exportDir = Join-Path $WorkDir 'export'
 New-Item -ItemType Directory -Force $exportDir | Out-Null
 if (-not $Chats) {
-  Step 'Danh sách chat trong Zalo PC'
+  Step 'Chats in Zalo PC'
   node (Join-Path $here 'export-cdp.mjs') $exportDir --list
-  if ($LASTEXITCODE) { Fail 'Không đọc được danh sách chat từ Zalo PC.' }
+  if ($LASTEXITCODE) { Fail 'Could not read the chat list from Zalo PC.' }
   $meta = Get-Content (Join-Path $exportDir 'conversations.json') -Raw | ConvertFrom-Json
   $nameOf = {
     param($c)
     $id = $c.key -replace '^g', ''
     $n = if ($c.isGroup) { $meta.gmap.$id ?? $meta.gmap.($c.key) } else { $meta.fmap.($c.key) }
-    $n ?? '(không tên)'
+    $n ?? '(no name)'
   }
   $list = @($meta.convs | Sort-Object @{ e = { -not $_.pinned } }, @{ e = { [int]($_.numMsg ?? 0) }; Descending = $true })
   for ($i = 0; $i -lt $list.Count; $i++) {
     $c = $list[$i]
-    '{0,4}. {1} {2,-40} {3,7} tin  [{4}]' -f ($i + 1), ($c.isGroup ? '👥' : '👤'), (& $nameOf $c), ($c.numMsg ?? '?'), $c.key
+    '{0,4}. {1} {2,-40} {3,7} msgs  [{4}]' -f ($i + 1), ($c.isGroup ? '👥' : '👤'), (& $nameOf $c), ($c.numMsg ?? '?'), $c.key
   }
-  $pick = Read-Host "`nChọn chat: số/khoảng (vd 1,3,5-8), 'groups', 'dms' hoặc 'all'"
+  $pick = Read-Host "`nPick chats: numbers/ranges (e.g. 1,3,5-8), 'groups', 'dms' or 'all'"
   $Chats = switch -Regex ($pick.Trim()) {
     '^all$' { $list.key }
     '^groups$' { ($list | Where-Object isGroup).key }
@@ -115,13 +118,13 @@ if (-not $Chats) {
   }
   $Chats = @($Chats | Where-Object { $_ })
 }
-if (-not $Chats) { Fail 'Không có chat nào được chọn.' }
+if (-not $Chats) { Fail 'No chat selected.' }
 $order = Join-Path $WorkDir 'order.txt'
 Set-Content -Path $order -Value $Chats -Encoding utf8NoBOM
-Write-Host "  $($Chats.Count) chat → $order"
+Write-Host "  $($Chats.Count) chat(s) → $order"
 
 # --- 4. run the migration --------------------------------------------------------
-Step 'Import (export → rebuild trong Beeper → kiểm tra → xoá room cũ)'
+Step 'Import (export → rebuild in Beeper → verify → delete old room)'
 $log = Join-Path $WorkDir 'run.log'
 $done = Join-Path $WorkDir 'done.txt'
 $doneBefore = @(if (Test-Path $done) { Get-Content $done })
@@ -140,15 +143,16 @@ function Show-Progress {
   }
   $script:logSeen = $lines.Count
 }
+$env:CONTAINER_CLI = $ContainerCli # read by migrate-all.sh
 $proc = Start-Process $bash -ArgumentList $bashArgs -NoNewWindow -PassThru
 while (-not $proc.HasExited) { Start-Sleep -Seconds 2; Show-Progress }
 Show-Progress
 
 # --- 5. summary ---------------------------------------------------------------
-Step 'Kết quả'
+Step 'Summary'
 $new = @(Get-Content $done | Select-Object -Skip $doneBefore.Count)
 $ok = @($new | Where-Object { $_ -like 'OK *' }).Count
 $failed = @($new | Where-Object { $_ -like 'FAIL *' })
-Write-Host "  OK: $ok   FAIL: $($failed.Count)   (chi tiết: $log)"
-$failed | ForEach-Object { Write-Host "  $_ — chạy lại script để thử lại, room cũ vẫn được giữ" -ForegroundColor Yellow }
-Write-Host "`nLưu ý: debug port của Zalo PC vẫn mở. Thoát Zalo PC và mở lại bình thường khi xong." -ForegroundColor DarkGray
+Write-Host "  OK: $ok   FAIL: $($failed.Count)   (details: $log)"
+$failed | ForEach-Object { Write-Host "  $_ — re-run to retry; its old room was kept" -ForegroundColor Yellow }
+Write-Host "`nNote: Zalo PC still has its debug port open. Quit it and start it normally when done." -ForegroundColor DarkGray

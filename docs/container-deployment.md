@@ -102,6 +102,11 @@ docker run --rm -v zalo-beeper-bridge_zalo-data:/data -v "$PWD":/backup busybox 
   tar czf /backup/zalo-data.tgz -C /data .
 ```
 
+## History import and a second account
+
+- Import history with `scripts/zalo-pc/import.ps1` (Windows) or `scripts/zalo-pc/import.sh` (macOS) — see the README section "Importing Zalo history". They run the importer inside this container (`-ContainerCli docker` / `-r docker` for Docker, `-Container` / `-n` for another container name).
+- A second Zalo account runs as a second bridge with its own `bbctl register` name, config dir and volume — see the README section "Multiple Zalo accounts".
+
 ## Limits
 
 - Backfilled messages only go into rooms that are still empty (old messages are never
