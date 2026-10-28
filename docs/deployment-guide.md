@@ -50,7 +50,7 @@ After editing a `.plist`, copy it to `~/Library/LaunchAgents/` again and `unload
 
 ## Bot commands (in the Beeper management chat)
 
-`ping` · `status` · `login` (QR) · `logout` · `sync` (pinned + top groups).
+`ping` · `status` · `login` (QR) · `logout` · `sync` (pinned + top groups) · `accounts` (Zalo accounts seen by this bridge).
 
 ## Troubleshooting
 

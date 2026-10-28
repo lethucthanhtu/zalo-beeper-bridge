@@ -123,6 +123,8 @@ export async function ensureNetworkIdentity(bridge: Bridge, branding: NetworkBra
  * @param threadType - `group` → Beeper room type `group_dm`, otherwise `dm`.
  * @param branding - Network name/logo/id and the state key.
  * @param botMxid - Bridge bot MXID (`bridgebot`).
+ * @param receiver - Zalo uid of the account the portal belongs to (`channel.fi.mau.receiver`,
+ *   as mautrix bridgev2 sets it, so Beeper can tell logins apart); omitted when unknown.
  */
 export async function tagPortalNetwork(
   intent: Intent,
@@ -132,6 +134,7 @@ export async function tagPortalNetwork(
   threadType: ZaloThreadType,
   branding: NetworkBranding,
   botMxid: string,
+  receiver?: string | null,
 ): Promise<void> {
   const logoMxc = await getLogoMxc(intent, branding.logoPath);
   const content = {
@@ -143,7 +146,7 @@ export async function tagPortalNetwork(
       ...(logoMxc ? { avatar_url: logoMxc } : {}),
       external_url: 'https://zalo.me',
     },
-    channel: { id: channelId, displayname: channelName },
+    channel: { id: channelId, displayname: channelName, ...(receiver ? { 'fi.mau.receiver': receiver } : {}) },
     'com.beeper.room_type.v2': threadType === 'group' ? 'group_dm' : 'dm',
   };
   for (const eventType of BRIDGE_EVENT_TYPES) {

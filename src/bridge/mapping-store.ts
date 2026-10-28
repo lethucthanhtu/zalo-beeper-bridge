@@ -9,13 +9,23 @@ export type PortalRow = {
   thread_type: ZaloThreadType;
   room_id: string;
   name: string | null;
+  /** Zalo uid of the account this portal belongs to (null until that account first logged in) */
+  account_id?: string | null;
+};
+
+/** One `account` row: a Zalo account this bridge has logged in to. */
+export type AccountRow = {
+  zalo_uid: string;
+  creds_path: string;
+  added_at: number;
+  last_login_at: number | null;
 };
 
 /** Which way a message was bridged: Zalo → Matrix ('inbound') or Matrix → Zalo ('outbound'). */
 export type MessageDirection = 'inbound' | 'outbound';
 
 /** Target `PRAGMA user_version`; bump it together with a new step in `migrate()`. */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /**
  * Synchronous SQLite-backed store for everything the bridge must remember across
@@ -25,6 +35,8 @@ const SCHEMA_VERSION = 6;
  */
 export class MappingStore {
   private readonly db: Database.Database;
+  /** Zalo uid of the logged-in account; stamped on new portal / message rows (null before login). */
+  private accountId: string | null = null;
 
   /**
    * Opens (or creates) the database file, switches it to WAL journaling and
@@ -36,6 +48,39 @@ export class MappingStore {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.migrate();
+  }
+
+  /** The account new rows are stamped with (see bindAccount), or null before the first login. */
+  get currentAccountId(): string | null {
+    return this.accountId;
+  }
+
+  /**
+   * Called on every Zalo login: records the account (with the credentials file it uses),
+   * makes it the account new rows are stamped with, and assigns every row that has no
+   * account yet (everything bridged before accounts were tracked) to it.
+   * @returns How many portal and message rows were assigned to the account.
+   */
+  bindAccount(zaloUid: string, credsPath: string): { portals: number; messages: number } {
+    return this.db.transaction(() => {
+      const now = Date.now();
+      this.db
+        .prepare(
+          `INSERT INTO account (zalo_uid, creds_path, added_at, last_login_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(zalo_uid) DO UPDATE SET creds_path = excluded.creds_path, last_login_at = excluded.last_login_at`,
+        )
+        .run(zaloUid, credsPath, now, now);
+      this.accountId = zaloUid;
+      return {
+        portals: this.db.prepare('UPDATE portal SET account_id = ? WHERE account_id IS NULL').run(zaloUid).changes,
+        messages: this.db.prepare('UPDATE message SET account_id = ? WHERE account_id IS NULL').run(zaloUid).changes,
+      };
+    })();
+  }
+
+  /** Every Zalo account the bridge has logged in to, oldest first. */
+  listAccounts(): AccountRow[] {
+    return this.db.prepare('SELECT * FROM account ORDER BY added_at').all() as AccountRow[];
   }
 
   /**
@@ -61,6 +106,20 @@ export class MappingStore {
       // when the contact's Zalo profile was last looked up — so a contact without an
       // avatar is not looked up again on every event (avatar_url stays null for them)
       if (current < 6) this.db.exec('ALTER TABLE puppet ADD COLUMN profile_checked_at INTEGER');
+      // Multi-account groundwork (additive only — keys and lookups are unchanged): the
+      // accounts the bridge logged in to, and which account each portal / message is from
+      if (current < 7) {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS account (
+            zalo_uid      TEXT PRIMARY KEY,
+            creds_path    TEXT NOT NULL,
+            added_at      INTEGER NOT NULL,
+            last_login_at INTEGER
+          );
+          ALTER TABLE portal ADD COLUMN account_id TEXT;
+          ALTER TABLE message ADD COLUMN account_id TEXT;
+        `);
+      }
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     })();
   }
@@ -150,7 +209,7 @@ export class MappingStore {
   /** Portal of a Zalo thread, or undefined when the thread has no room yet. */
   getPortalByThread(threadId: string): PortalRow | undefined {
     return this.db
-      .prepare('SELECT thread_id, thread_type, room_id, name FROM portal WHERE thread_id = ?')
+      .prepare('SELECT thread_id, thread_type, room_id, name, account_id FROM portal WHERE thread_id = ?')
       .get(threadId) as PortalRow | undefined;
   }
 
@@ -161,13 +220,14 @@ export class MappingStore {
 
   /** Portal behind a Matrix room, or undefined when the room is not a portal. */
   getPortalByRoom(roomId: string): PortalRow | undefined {
-    return this.db.prepare('SELECT thread_id, thread_type, room_id, name FROM portal WHERE room_id = ?').get(roomId) as
-      PortalRow | undefined;
+    return this.db
+      .prepare('SELECT thread_id, thread_type, room_id, name, account_id FROM portal WHERE room_id = ?')
+      .get(roomId) as PortalRow | undefined;
   }
 
   /** Every known portal (startup repairs and the history importer iterate over these). */
   getAllPortals(): PortalRow[] {
-    return this.db.prepare('SELECT thread_id, thread_type, room_id, name FROM portal').all() as PortalRow[];
+    return this.db.prepare('SELECT thread_id, thread_type, room_id, name, account_id FROM portal').all() as PortalRow[];
   }
 
   /** True when the bridge itself posted this Matrix event (echo guard for outbound). */
@@ -183,9 +243,9 @@ export class MappingStore {
   markOutboundHandled(eventId: string, roomId: string): void {
     this.db
       .prepare(
-        "INSERT OR IGNORE INTO message (zalo_msg_id, room_id, event_id, direction, ts) VALUES (?, ?, ?, 'outbound', ?)",
+        "INSERT OR IGNORE INTO message (zalo_msg_id, room_id, event_id, direction, ts, account_id) VALUES (?, ?, ?, 'outbound', ?, ?)",
       )
-      .run(`evt:${eventId}`, roomId, eventId, Date.now());
+      .run(`evt:${eventId}`, roomId, eventId, Date.now(), this.accountId);
   }
 
   /** Matrix event for a Zalo msgId (read-receipt mapping). */
@@ -264,7 +324,7 @@ export class MappingStore {
         .run(row.room_id, row.name, row.thread_id);
       if (updated.changes === 0) this.insertPortal(row);
       const upsert = this.db.prepare(
-        `INSERT INTO message (zalo_msg_id, room_id, event_id, direction, ts, cli_msg_id, msg_type) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO message (zalo_msg_id, room_id, event_id, direction, ts, cli_msg_id, msg_type, account_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(zalo_msg_id) DO UPDATE SET room_id = excluded.room_id, event_id = excluded.event_id`,
       );
       for (const message of messages)
@@ -276,6 +336,7 @@ export class MappingStore {
           Date.now(),
           message.cliMsgId,
           message.msgType,
+          this.accountId,
         );
     })();
   }
@@ -317,8 +378,10 @@ export class MappingStore {
    */
   insertPortal(row: PortalRow): void {
     this.db
-      .prepare('INSERT INTO portal (thread_id, thread_type, room_id, name, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(row.thread_id, row.thread_type, row.room_id, row.name, Date.now());
+      .prepare(
+        'INSERT INTO portal (thread_id, thread_type, room_id, name, created_at, account_id) VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .run(row.thread_id, row.thread_type, row.room_id, row.name, Date.now(), row.account_id ?? this.accountId);
   }
 
   /**
@@ -370,9 +433,9 @@ export class MappingStore {
   ): boolean {
     const result = this.db
       .prepare(
-        'INSERT OR IGNORE INTO message (zalo_msg_id, room_id, event_id, direction, ts, quote_json, cli_msg_id, sender_id, msg_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT OR IGNORE INTO message (zalo_msg_id, room_id, event_id, direction, ts, quote_json, cli_msg_id, sender_id, msg_type, account_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(zaloMsgId, roomId, eventId, direction, Date.now(), quoteJson, cliMsgId, senderId, msgType);
+      .run(zaloMsgId, roomId, eventId, direction, Date.now(), quoteJson, cliMsgId, senderId, msgType, this.accountId);
     if (result.changes === 0) {
       // Outbound send and its selfListen echo race to record the same msgId; each
       // carries a different piece (send → event_id, echo → cli_msg_id). Backfill

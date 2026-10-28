@@ -120,6 +120,7 @@ export class PortalManager {
         portal.thread_type,
         this.branding,
         botMxid,
+        portal.account_id,
       );
     }
   }
@@ -214,6 +215,7 @@ export class PortalManager {
       row.thread_type,
       this.branding,
       this.bridge.getBot().getUserId(),
+      row.account_id ?? this.store.currentAccountId,
     );
     await this.ensureOwnerJoined(row.room_id);
   }

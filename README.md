@@ -154,13 +154,14 @@ Beeper shows it as a separate network; a contact you know from both accounts get
 
 Send these to the bridge bot in its management chat (owner only):
 
-| Command  | Action                                                                                                                           |
-| -------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `ping`   | health check (`pong` + uptime)                                                                                                   |
-| `login`  | start QR login to Zalo                                                                                                           |
-| `logout` | log out and clear saved credentials                                                                                              |
-| `status` | login state, listener state, uptime                                                                                              |
-| `sync`   | create rooms for pinned chats + every group, fill empty rooms with the history Zalo allows this session (none from before login) |
+| Command    | Action                                                                                                                           |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `ping`     | health check (`pong` + uptime)                                                                                                   |
+| `login`    | start QR login to Zalo                                                                                                           |
+| `logout`   | log out and clear saved credentials                                                                                              |
+| `status`   | login state, listener state, uptime                                                                                              |
+| `sync`     | create rooms for pinned chats + every group, fill empty rooms with the history Zalo allows this session (none from before login) |
+| `accounts` | the Zalo accounts this bridge has logged in to, and which one is logged in now (read-only)                                       |
 
 ## Importing Zalo history
 
@@ -330,7 +331,7 @@ src/matrix/*      matrix-appservice-bridge (Bridge + Intents), network branding,
 bbctl proxy  ──►  Beeper Matrix server  ──►  Beeper clients
 ```
 
-- **Mapping store** (`better-sqlite3`): portals, puppets, and messages keyed by Zalo `msgId` → Matrix event, with `cliMsgId` / quote / direction / sender for reactions, recall and receipts.
+- **Mapping store** (`better-sqlite3`): portals, puppets, and messages keyed by Zalo `msgId` → Matrix event, with `cliMsgId` / quote / direction / sender for reactions, recall and receipts. Schema v7 adds an `account` table and an `account_id` on every portal and message (filled on login) — groundwork for one bridge serving several Zalo accounts; portals also carry it as `fi.mau.receiver` in their `m.bridge` state, like mautrix bridgev2.
 - **Shared media rendering** (`src/bridge/media-content.ts`): one code path builds `m.image` / `m.video` / `m.file` / `m.audio` / `m.sticker` events and link previews for both live messages and the importer.
 - **Animated stickers** (`src/bridge/animated-sticker.ts`): Zalo returns no animated sticker URL for classic stickers; like Zalo PC, the bridge steps through the public sprite strip and encodes a looping WebP (libwebp via `wasm-webp`), with frame timing from `assets/zalo-sticker-timing.json`.
 - **Echo suppression:** outbound sends are matched against their own `selfListen` echo (by `msgId`, with a content/URL fallback) so the bridge never re-posts what you just sent.

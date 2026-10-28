@@ -128,6 +128,7 @@ const outbound = new OutboundHandler({
 });
 const syncManager = new SyncManager({ zalo, portals, inbound, store });
 botContext.runSync = () => syncManager.run();
+botContext.listAccounts = () => store.listAccounts();
 
 // Fail fast if computed ghost MXIDs cannot be registered under this appservice
 const usersRegex = registration.namespaces?.users?.[0]?.regex;
@@ -162,6 +163,14 @@ let profileRepairFailedAt = 0;
 // Zalo listener lifecycle → logs + Beeper remote-account state
 zalo.on('connected', () => {
   console.log('[zalo] listener connected');
+  // Multi-account groundwork: remember this account and file untagged rows under it
+  const ownId = zalo.ownId;
+  if (ownId) {
+    const assigned = store.bindAccount(ownId, config.zalo.credsPath);
+    if (assigned.portals || assigned.messages) {
+      console.log(`[bridge] account ${ownId}: ${assigned.portals} portals, ${assigned.messages} messages assigned`);
+    }
+  }
   void portals.repairDmGhostNames().catch((err) => console.warn('DM name repair failed:', err));
   if (!profileRepairStarted && Date.now() - profileRepairFailedAt >= PROFILE_REPAIR_RETRY_AFTER_MS) {
     profileRepairStarted = true;

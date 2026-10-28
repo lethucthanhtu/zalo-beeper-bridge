@@ -1,6 +1,7 @@
 // Management commands handled by the bridge bot (@sh-zalobot).
 // Commands accepted ONLY from the configured owner (single-user bridge).
 import type { Bridge, WeakEvent } from 'matrix-appservice-bridge';
+import type { AccountRow } from '../bridge/mapping-store.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
 
 /** Process start time (module load), the reference point for the reported uptime. */
@@ -19,6 +20,8 @@ export type BotCommandContext = {
   ownerUserId: string;
   /** Conversation sync (pinned + top groups); returns a summary message. */
   runSync?: () => Promise<string>;
+  /** Zalo accounts the bridge has logged in to (multi-account groundwork). */
+  listAccounts?: () => AccountRow[];
 };
 
 /**
@@ -73,9 +76,30 @@ async function handleStatus(context: BotCommandContext, roomId: string): Promise
 }
 
 /**
+ * `accounts` command (read-only): lists the Zalo accounts this bridge has logged in to,
+ * marking the one that is logged in now.
+ *
+ * @param context - Bot command context.
+ * @param roomId - Management room to answer in.
+ */
+async function handleAccounts(context: BotCommandContext, roomId: string): Promise<void> {
+  const accounts = context.listAccounts?.() ?? [];
+  const current = context.zalo.ownId;
+  /** ISO date-time without seconds, or "never". */
+  const when = (ms: number | null) => (ms ? new Date(ms).toISOString().slice(0, 16).replace('T', ' ') : 'never');
+  const lines = accounts.length
+    ? accounts.map(
+        (account) =>
+          `${account.zalo_uid === current ? '●' : '○'} ${account.zalo_uid} — last login ${when(account.last_login_at)} UTC${account.zalo_uid === current ? ` (logged in, listener ${context.zalo.status.listener})` : ''}`,
+      )
+    : ["no Zalo account yet — send 'login'"];
+  await context.bridge.getIntent().sendText(roomId, ['Zalo accounts:', ...lines].join('\n'));
+}
+
+/**
  * Handles bot-directed events (any event outside a portal room). Auto-joins the owner's
  * invite to the bot and dispatches the owner's text commands
- * (`ping | login | logout | status | sync`); everyone else is ignored.
+ * (`ping | login | logout | status | sync | accounts`); everyone else is ignored.
  *
  * Side effects: Matrix joins/sends as the bot; `login`/`logout`/`sync` change Zalo state.
  *
@@ -96,7 +120,10 @@ export async function handleBotEvent(context: BotCommandContext, event: WeakEven
       await context.bridge.getIntent().join(event.room_id);
       await context.bridge
         .getIntent()
-        .sendText(event.room_id, 'sh-zalo bridge bot ready. Commands: ping | login | logout | status | sync');
+        .sendText(
+          event.room_id,
+          'sh-zalo bridge bot ready. Commands: ping | login | logout | status | sync | accounts',
+        );
     }
     return true;
   }
@@ -118,6 +145,9 @@ export async function handleBotEvent(context: BotCommandContext, event: WeakEven
       return true;
     case 'status':
       await handleStatus(context, event.room_id);
+      return true;
+    case 'accounts':
+      await handleAccounts(context, event.room_id);
       return true;
     case 'sync': {
       if (!context.runSync || !context.zalo.isLoggedIn) {
