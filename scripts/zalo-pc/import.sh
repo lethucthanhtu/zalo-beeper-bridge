@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# One-command Zalo PC → Beeper history import (macOS; also works on Linux with Zalo PC
-# under Wine or on Windows Git Bash with ZALO_APP pointing at Zalo.exe).
+# One-command Zalo PC → Beeper history import (macOS). Windows: use import.ps1.
 #
 #   1. preflight: bridge container running, Beeper reachable, node present
 #   2. Zalo PC: (re)starts it with the local debug port 9229 if needed (asks first)
@@ -20,12 +19,15 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+# Prints the header comment (from the description to the last option line)
+usage() { sed -n '2,/^#   -p/p' "$0" | sed 's/^# \{0,1\}//'; }
 WORK="$HERE/../../work" CHATS="" OWN_UID="" MEDIA="" CONTAINER=zalo-beeper-bridge CLI=podman PORT=9229
 while getopts "c:w:u:m:n:r:p:h" opt; do
   case $opt in
     c) CHATS=$OPTARG ;; w) WORK=$OPTARG ;; u) OWN_UID=$OPTARG ;; m) MEDIA=$OPTARG ;;
     n) CONTAINER=$OPTARG ;; r) CLI=$OPTARG ;; p) PORT=$OPTARG ;;
-    *) sed -n '2,22p' "$0"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
   esac
 done
 mkdir -p "$WORK"
@@ -58,7 +60,7 @@ if ! up "$CDP"; then
   [ -d "$ZALO_APP" ] || fail "Zalo PC not found at $ZALO_APP (set ZALO_APP=...)."
   if pgrep -x Zalo > /dev/null; then
     printf '  Zalo PC is running WITHOUT the debug port. Close and restart it? (y/N) '
-    read -r answer
+    read -r answer || answer='' # no terminal (EOF) = no
     case $answer in [yY]*) ;; *) fail "Cancelled. Restart Zalo PC with --remote-debugging-port=$PORT yourself, then re-run." ;; esac
     osascript -e 'quit app "Zalo"' > /dev/null 2>&1 || pkill -x Zalo || true
     # wait for it to exit, so `open` starts a new instance that gets the flag
@@ -105,7 +107,7 @@ if [ -z "$CHATS" ]; then
   }
   pick
   printf "\nPick chats: numbers/ranges (e.g. 1,3,5-8), 'groups', 'dms' or 'all': "
-  read -r selection
+  read -r selection || selection=''
   CHATS=$(pick "$selection")
 fi
 [ -n "$CHATS" ] || fail 'No chat selected.'
@@ -126,8 +128,11 @@ show_progress() {
   [ "$total" -gt "$seen" ] && sed -n "$((seen + 1)),${total}p" "$LOG" | grep -E '^===|^\[import\] done|^--- waiting' | sed 's/^/  /' || true
   seen=$total
 }
-CONTAINER_CLI=$CLI bash "$HERE/migrate-all.sh" "$WORK" "$ORDER" "$OWN_UID" ${MEDIA:+"$MEDIA"} &
+CONTAINER_CLI=$CLI BRIDGE_CONTAINER=$CONTAINER ZALO_CDP_URL="http://127.0.0.1:$PORT" \
+  bash "$HERE/migrate-all.sh" "$WORK" "$ORDER" "$OWN_UID" ${MEDIA:+"$MEDIA"} &
 pid=$!
+# A background job in a script ignores Ctrl-C: stop it explicitly, or it keeps importing unseen
+trap 'kill "$pid" 2> /dev/null; fail "Interrupted — the chat in progress keeps its old room; re-run to continue."' INT TERM
 while kill -0 "$pid" 2> /dev/null; do sleep 2; show_progress; done
 wait "$pid" || true
 show_progress

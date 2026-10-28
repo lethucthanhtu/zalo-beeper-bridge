@@ -143,7 +143,10 @@ function Show-Progress {
   }
   $script:logSeen = $lines.Count
 }
-$env:CONTAINER_CLI = $ContainerCli # read by migrate-all.sh
+# read by migrate-all.sh (and export-cdp.mjs for the CDP URL)
+$env:CONTAINER_CLI = $ContainerCli
+$env:BRIDGE_CONTAINER = $Container
+$env:ZALO_CDP_URL = "http://127.0.0.1:$CdpPort"
 $proc = Start-Process $bash -ArgumentList $bashArgs -NoNewWindow -PassThru
 while (-not $proc.HasExited) { Start-Sleep -Seconds 2; Show-Progress }
 Show-Progress

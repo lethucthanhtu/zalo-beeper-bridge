@@ -9,13 +9,15 @@
 # Usage: scripts/zalo-pc/migrate-all.sh <workDir> <order.txt> <ownerZaloUid> [mediaDirInContainer]
 #   order.txt: one thread key per line ("g<groupId>" or a DM peer uid), in the order to run
 #   Zalo PC must run with --remote-debugging-port=9229; container name: zalo-beeper-bridge
-#   CONTAINER_CLI=docker to use docker instead of podman
+#   CONTAINER_CLI=docker to use docker instead of podman; BRIDGE_CONTAINER=<name> for another
+#   container; ZALO_CDP_URL=http://127.0.0.1:<port> for another Zalo PC debug port
 set -u
 export MSYS_NO_PATHCONV=1 # Git Bash on Windows: keep container paths as-is
 WORK=$1 ORDER=$2 OWNER=$3 MEDIA=${4:-}
 # HERE = this script's dir (for export-cdp.mjs); C = container name; LOG/DONE/OUT live in <workDir>
 HERE=$(cd "$(dirname "$0")" && pwd)
-C=zalo-beeper-bridge
+C=${BRIDGE_CONTAINER:-zalo-beeper-bridge}
+export ZALO_CDP_URL=${ZALO_CDP_URL:-http://127.0.0.1:9229} # also read by export-cdp.mjs
 CLI=${CONTAINER_CLI:-podman}
 LOG="$WORK/run.log" DONE="$WORK/done.txt" OUT="$WORK/export"
 # Importer output lines matching NOISE (library deprecation/ghost-registration chatter) are dropped from the log
@@ -30,7 +32,7 @@ while read -r key; do
   n=$((n+1)); grep -q "^OK $key$" "$DONE" && continue
   # Block until Beeper (from host and container) and the Zalo PC CDP port all answer; re-check every 60s
   # (bash redirection, not curl -o /dev/null: MSYS_NO_PATHCONV hands curl.exe a literal /dev/null)
-  until curl -s -m 15 -f https://matrix.beeper.com/_matrix/client/versions > /dev/null && curl -s -m 5 -f http://127.0.0.1:9229/json/list > /dev/null \
+  until curl -s -m 15 -f https://matrix.beeper.com/_matrix/client/versions > /dev/null && curl -s -m 5 -f "$ZALO_CDP_URL/json/list" > /dev/null \
         && "$CLI" exec "$C" node -e 'fetch("https://matrix.beeper.com/_matrix/client/versions").then(r=>process.exit(r.ok?0:1),()=>process.exit(1))'; do
     echo "--- waiting for network / Zalo PC $(date '+%H:%M:%S')" >> "$LOG"; sleep 60
   done
