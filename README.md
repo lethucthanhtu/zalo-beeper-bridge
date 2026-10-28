@@ -359,6 +359,7 @@ podman run --rm -v "$PWD:/w" -w /w docker.io/library/node:24-bookworm-slim npm i
 - The bridge runs entirely on your machine; message content is only ever sent to Beeper (your homeserver) and Zalo.
 - Media is only downloaded over https from Zalo's CDN hosts (`zdn.vn`, `zadn.vn`, and the video/file CDNs `dlmd.me`/`mdchat.me`, `dlfl.vn`/`flchat.vn`), re-checked on every redirect hop. Logs carry ids and hosts only — never message content or signed media links.
 - Outbound traffic is rate-limited and the listener pauses on ban-suspicion signals to reduce risk to the account.
+- `npm audit` (2026-10-28, matrix-appservice-bridge 12.0.1): 6 findings remain, all unreachable from this bridge and without an upstream fix — `ip-address` via `ip-cidr` is only used by matrix-appservice-bridge's provisioning API (not enabled here), and `deepmerge` via `html-to-text` only by matrix-bot-sdk's `sendHtmlText`/`replyHtmlText` (not called). Re-check after upgrading either package.
 - **History import:** the Zalo PC debug port listens on `127.0.0.1` only, but any local program can read your messages through it while it is open — restart Zalo PC normally when done. The backup key (`get-uin.mjs`) decrypts every backup of the account: keep it in a private file and delete it after use. Extracted backups and prepared media contain your full history and media in clear text — delete `work/` (and `/data/import-*` in the container) after importing.
 
 ## Acknowledgements
