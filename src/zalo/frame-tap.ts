@@ -6,6 +6,7 @@
 // arrived. The payload envelope is identical, so rewriting the header cmd to 501
 // routes them through the normal DM handler (zca-js PR #384, closed unmerged).
 // Unknown cmds are logged once each so future protocol drift is visible.
+import { errorMessage } from '../error-message.ts';
 
 // version(u8) | cmd(u16 LE) | subCmd(i8) — mirrors zca-js listen.js getHeader
 const HEADER_BYTES = 4;
@@ -143,7 +144,7 @@ export function installFrameTap(listener: unknown): void {
               );
             }
           })
-          .catch((err) => console.log(`[zalo:ws] cmd ${header.cmd} undecodable: ${(err as Error).message}`));
+          .catch((err: unknown) => console.log(`[zalo:ws] cmd ${header.cmd} undecodable: ${errorMessage(err)}`));
       }
     }
     if (header?.cmd === E2EE_DM_CMD && !reportedCmds.has(E2EE_DM_CMD)) {

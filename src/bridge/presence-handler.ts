@@ -7,6 +7,7 @@ import type { PuppetRegistry } from './puppet-registry.ts';
 import { zaloToEmoji } from '../zalo/reaction-map.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
 import type { ZaloReactionEvent, ZaloSeenEvent, ZaloTypingEvent } from '../zalo/types.ts';
+import { errorMessage } from '../error-message.ts';
 
 /** A ghost's typing indicator is cleared after this long without a new typing event. */
 const TYPING_STOP_MS = 8_000;
@@ -112,7 +113,7 @@ export class PresenceHandler {
       await this.puppets
         .intentFor(uid)
         .sendReadReceipt(portal.room_id, eventId)
-        .catch((err: Error) => console.warn(`read receipt ${uid}@${portal.room_id} failed:`, err.message));
+        .catch((err: unknown) => console.warn(`read receipt ${uid}@${portal.room_id} failed:`, errorMessage(err)));
     }
   }
 
@@ -137,7 +138,7 @@ export class PresenceHandler {
       .sendEvent(target.roomId, 'm.reaction', {
         'm.relates_to': { rel_type: 'm.annotation', event_id: target.eventId, key: zaloToEmoji(event.icon) },
       })
-      .catch((err: Error) => console.warn('inbound reaction failed:', err.message));
+      .catch((err: unknown) => console.warn('inbound reaction failed:', errorMessage(err)));
   }
 
   /**

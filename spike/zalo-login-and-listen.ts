@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { Zalo, LoginQRCallbackEventType, type API } from 'zca-js';
+import { errorMessage } from '../src/error-message.ts';
 
 const spikeDir = path.dirname(fileURLToPath(import.meta.url));
 const CREDS_PATH = path.join(spikeDir, 'creds.session.json');
@@ -42,7 +43,7 @@ async function login(): Promise<API> {
       console.log('✓ Cookie re-login OK');
       return api;
     } catch (err) {
-      console.warn('Cookie re-login failed, falling back to QR:', (err as Error).message);
+      console.warn('Cookie re-login failed, falling back to QR:', errorMessage(err));
     }
   }
 
@@ -114,7 +115,7 @@ listener.on('closed', (code: unknown, reason: unknown) => {
   console.warn(`[closed] code=${code} reason=${reason} — note timestamp for stability report`);
 });
 listener.on('error', (error: unknown) => {
-  logEvent('error', { message: (error as Error)?.message ?? String(error) });
+  logEvent('error', { message: errorMessage(error) ?? String(error) });
   console.error('[error]', error);
 });
 

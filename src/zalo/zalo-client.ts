@@ -19,6 +19,7 @@ import type {
   ZaloThreadType,
   ZaloTypingEvent,
 } from './types.ts';
+import { errorMessage } from '../error-message.ts';
 
 export type ZaloClientOptions = {
   credsPath: string;
@@ -189,7 +190,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       this.api = await this.newZalo().login(creds);
       return true;
     } catch (err) {
-      console.warn('Zalo cookie re-login failed:', (err as Error).message);
+      console.warn('Zalo cookie re-login failed:', errorMessage(err));
       return false;
     }
   }
@@ -224,7 +225,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       switch (event.type) {
         case LoginQRCallbackEventType.QRCodeGenerated:
           // event.data.image is raw base64 PNG (data-URI prefix already stripped by zca-js)
-          void deliverQrPng(Buffer.from(event.data.image, 'base64')).catch((err) =>
+          void deliverQrPng(Buffer.from(event.data.image, 'base64')).catch((err: unknown) =>
             console.error('Failed to deliver QR image:', err),
           );
           break;
@@ -281,7 +282,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
           listener.requestOldMessages(ThreadType.User, null);
           listener.requestOldMessages(ThreadType.Group, null);
         } catch (err) {
-          console.warn('catch-up request failed:', (err as Error).message);
+          console.warn('catch-up request failed:', errorMessage(err));
         }
       }, 2_000);
     });
@@ -375,7 +376,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       const info = await this.api.getUserInfo(uid);
       return toProfile(info.changed_profiles[uid]);
     } catch (err) {
-      console.warn(`getUserInfo(${uid}) failed:`, (err as Error).message);
+      console.warn(`getUserInfo(${uid}) failed:`, errorMessage(err));
       return null;
     }
   }
@@ -409,7 +410,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       const sticker = details[0];
       return sticker?.stickerWebpUrl || sticker?.stickerUrl || null;
     } catch (err) {
-      console.warn(`getStickersDetail(${stickerId}) failed:`, (err as Error).message);
+      console.warn(`getStickersDetail(${stickerId}) failed:`, errorMessage(err));
       return null;
     }
   }
@@ -420,7 +421,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     try {
       return (await this.api.getPinConversations()).conversations ?? [];
     } catch (err) {
-      console.warn('getPinConversations failed:', (err as Error).message);
+      console.warn('getPinConversations failed:', errorMessage(err));
       return [];
     }
   }
@@ -431,7 +432,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     try {
       return Object.keys((await this.api.getAllGroups()).gridVerMap ?? {});
     } catch (err) {
-      console.warn('getAllGroups failed:', (err as Error).message);
+      console.warn('getAllGroups failed:', errorMessage(err));
       return null;
     }
   }
@@ -467,7 +468,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
         cursor = next;
       }
     } catch (err) {
-      console.warn(`group history (${threadId}) failed:`, (err as Error).message);
+      console.warn(`group history (${threadId}) failed:`, errorMessage(err));
     }
     return [...rawMessagesById.values()]
       .map((msg) => normalizeZaloMessage(msg as unknown as RawZaloMessage))
@@ -579,7 +580,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       try {
         api.listener.requestOldMessages(type, beforeMsgId);
       } catch (err) {
-        console.warn('requestOldMessages failed:', (err as Error).message);
+        console.warn('requestOldMessages failed:', errorMessage(err));
         this.historyCapture = null;
         clearTimeout(timer);
         resolve(null);
@@ -595,7 +596,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       const name = (info.gridInfoMap[threadId] as { name?: string } | undefined)?.name;
       return name || null;
     } catch (err) {
-      console.warn(`getGroupInfo(${threadId}) failed:`, (err as Error).message);
+      console.warn(`getGroupInfo(${threadId}) failed:`, errorMessage(err));
       return null;
     }
   }
@@ -671,7 +672,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
         toThreadType(threadType),
       );
     } catch (err) {
-      console.warn('sendSeenEvent failed:', (err as Error).message);
+      console.warn('sendSeenEvent failed:', errorMessage(err));
     }
   }
 

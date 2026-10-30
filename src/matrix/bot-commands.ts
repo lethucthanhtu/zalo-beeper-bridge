@@ -3,6 +3,7 @@
 import type { Bridge, WeakEvent } from 'matrix-appservice-bridge';
 import type { AccountRow } from '../bridge/mapping-store.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
+import { errorMessage } from '../error-message.ts';
 
 /** Process start time (module load), the reference point for the reported uptime. */
 const startedAt = Date.now();
@@ -55,7 +56,7 @@ async function handleLogin(context: BotCommandContext, roomId: string): Promise<
     context.zalo.startListening();
     await intent.sendText(roomId, `✓ Logged in to Zalo (uid ${context.zalo.ownId}), listener started.`);
   } catch (err) {
-    await intent.sendText(roomId, `Zalo login failed: ${(err as Error).message}`);
+    await intent.sendText(roomId, `Zalo login failed: ${errorMessage(err)}`);
   }
 }
 
@@ -162,7 +163,7 @@ export async function handleBotEvent(context: BotCommandContext, event: WeakEven
         await context.bridge.getIntent().sendText(event.room_id, summary);
       } catch (err) {
         // the owner asked for it — tell them, don't just log
-        await context.bridge.getIntent().sendText(event.room_id, `Sync failed: ${(err as Error).message}`);
+        await context.bridge.getIntent().sendText(event.room_id, `Sync failed: ${errorMessage(err)}`);
       }
       return true;
     }

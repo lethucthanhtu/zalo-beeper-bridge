@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import type { Bridge, Intent } from 'matrix-appservice-bridge';
 import { bridgeIdFor } from '../bridge/puppet-registry.ts';
 import type { ZaloThreadType } from '../zalo/types.ts';
+import { errorMessage } from '../error-message.ts';
 
 /** How the bridge presents itself in Beeper: config `network` section + the computed state key. */
 export type NetworkBranding = {
@@ -73,9 +74,11 @@ export async function ensureNetworkIdentity(bridge: Bridge, branding: NetworkBra
   const logoMxc = await getLogoMxc(intent, branding.logoPath);
   await intent
     .setDisplayName(branding.name)
-    .catch((err: Error) => console.warn('bot setDisplayName failed:', err.message));
+    .catch((err: unknown) => console.warn('bot setDisplayName failed:', errorMessage(err)));
   if (logoMxc)
-    await intent.setAvatarUrl(logoMxc).catch((err: Error) => console.warn('bot setAvatarUrl failed:', err.message));
+    await intent
+      .setAvatarUrl(logoMxc)
+      .catch((err: unknown) => console.warn('bot setAvatarUrl failed:', errorMessage(err)));
   // PATCH the profile with com.beeper.bridge.* so Beeper maps the bot to a network
   const profile: Record<string, unknown> = {
     displayname: branding.name,
@@ -87,7 +90,7 @@ export async function ensureNetworkIdentity(bridge: Bridge, branding: NetworkBra
   await intent.matrixClient
     // bot-sdk 0.10 types omit PATCH, but its undici transport sends any method
     .doRequest('PATCH' as 'PUT', `/_matrix/client/v3/profile/${encodeURIComponent(botMxid)}`, null, profile)
-    .catch((err: Error) => console.warn('bot profile PATCH failed:', err.message));
+    .catch((err: unknown) => console.warn('bot profile PATCH failed:', errorMessage(err)));
 }
 
 /**
@@ -131,6 +134,6 @@ export async function tagPortalNetwork(
   for (const eventType of BRIDGE_EVENT_TYPES) {
     await intent
       .sendStateEvent(roomId, eventType, branding.stateKey, content)
-      .catch((err: Error) => console.warn(`${eventType} state failed for ${roomId}:`, err.message));
+      .catch((err: unknown) => console.warn(`${eventType} state failed for ${roomId}:`, errorMessage(err)));
   }
 }

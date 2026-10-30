@@ -7,6 +7,7 @@ import type { MappingStore } from './mapping-store.ts';
 import type { PortalManager } from './portal-manager.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
 import type { ZaloMessage, ZaloThreadType } from '../zalo/types.ts';
+import { errorMessage } from '../error-message.ts';
 
 /** Pause before every Zalo API call of the sync. */
 const PACE_MS = 1_500;
@@ -187,7 +188,7 @@ export class SyncManager {
         }
         portalsEnsured++;
       } catch (err) {
-        failures.push(`${target.threadId}: ${(err as Error).message}`);
+        failures.push(`${target.threadId}: ${errorMessage(err)}`);
       }
     }
 

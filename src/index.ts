@@ -169,7 +169,7 @@ zalo.on('connected', () => {
       console.warn('[bridge] recording the Zalo account failed (retried on the next connect):', err);
     }
   }
-  void portals.repairDmGhostNames().catch((err) => console.warn('DM name repair failed:', err));
+  void portals.repairDmGhostNames().catch((err: unknown) => console.warn('DM name repair failed:', err));
   if (!profileRepairStarted && Date.now() - profileRepairFailedAt >= PROFILE_REPAIR_RETRY_AFTER_MS) {
     profileRepairStarted = true;
     void puppets
@@ -182,7 +182,7 @@ zalo.on('connected', () => {
           profileRepairFailedAt = Date.now();
         }
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         profileRepairStarted = false;
         profileRepairFailedAt = Date.now();
         console.warn('profile repair failed:', err);
@@ -211,16 +211,18 @@ const presence = new PresenceHandler(store, puppets, zalo, config.matrix.owner, 
 // Zalo ephemeral signals → ghost read receipts / typing / reactions in Matrix (errors logged)
 zalo.on(
   'seen',
-  (seenEvent) => void presence.handleSeen(seenEvent).catch((err) => console.warn('seen handling failed:', err)),
+  (seenEvent) =>
+    void presence.handleSeen(seenEvent).catch((err: unknown) => console.warn('seen handling failed:', err)),
 );
 zalo.on(
   'typing',
-  (typingEvent) => void presence.handleTyping(typingEvent).catch((err) => console.warn('typing handling failed:', err)),
+  (typingEvent) =>
+    void presence.handleTyping(typingEvent).catch((err: unknown) => console.warn('typing handling failed:', err)),
 );
 zalo.on(
   'reaction',
   (reactionEvent) =>
-    void presence.handleReaction(reactionEvent).catch((err) => console.warn('reaction handling failed:', err)),
+    void presence.handleReaction(reactionEvent).catch((err: unknown) => console.warn('reaction handling failed:', err)),
 );
 
 // Appservice MUST be up before the Zalo listener: intents throw pre-initialise,
@@ -228,13 +230,13 @@ zalo.on(
 await startBridge(bridge, config);
 await ensureNetworkIdentity(bridge, branding);
 // Backfill the network chip on portals created before branding existed
-void portals.rebrandExistingPortals().catch((err) => console.warn('portal rebrand failed:', err));
+void portals.rebrandExistingPortals().catch((err: unknown) => console.warn('portal rebrand failed:', err));
 // Repair portals: drop ones built from prefixed pinned ids, then join the owner into
 // any left at "invite" (invisible in Beeper) by the old broken owner auto-join
 void portals
   .removeMalformedPortals()
   .then(() => portals.joinOwnerToExistingPortals())
-  .catch((err) => console.warn('portal repair failed:', err));
+  .catch((err: unknown) => console.warn('portal repair failed:', err));
 
 // Silent cookie re-login at startup; QR (via 'login' command) when absent/expired
 if (await zalo.loginFromSavedCredentials()) {

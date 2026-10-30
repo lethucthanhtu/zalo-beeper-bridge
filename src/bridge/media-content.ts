@@ -5,6 +5,7 @@
 // Zalo link card into a Beeper link preview (com.beeper.linkpreviews).
 import { adtsToM4a, isAdts } from './audio-remux.ts';
 import { fetchMediaCapped, sniffMimetype } from './media-handler.ts';
+import { errorMessage } from '../error-message.ts';
 
 export type MediaKind = 'image' | 'sticker' | 'video' | 'file' | 'audio';
 
@@ -107,7 +108,7 @@ export async function fetchFirstMedia(
     } catch (err) {
       // expired / dead host → next candidate. Log the host only: the path is a signed token
       const host = URL.canParse(url) ? new URL(url).hostname : 'invalid-url';
-      console.warn(`[media] download from ${host} failed: ${err instanceof Error ? err.message : err}`);
+      console.warn(`[media] download from ${host} failed: ${errorMessage(err)}`);
     }
   }
   return null;

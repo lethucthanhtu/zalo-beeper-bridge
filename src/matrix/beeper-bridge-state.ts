@@ -10,6 +10,7 @@
 //   POST .../bridge/<id>/bridge_remote_state  snake_case `state_event`, per-account states  ← this one
 
 import type { ZaloProfile } from '../zalo/types.ts';
+import { errorMessage } from '../error-message.ts';
 
 const BEEPER_API_BASE = 'https://api.beeper.com';
 
@@ -113,8 +114,8 @@ export function createZaloStatePublisher(
  * `.catch` handler for a failed avatar upload: logs a warning and yields `undefined` so the
  * state is still published, just without an avatar.
  */
-function warnAvatar(err: Error): undefined {
-  console.warn('[beeper] own avatar upload failed:', err.message);
+function warnAvatar(err: unknown): undefined {
+  console.warn('[beeper] own avatar upload failed:', errorMessage(err));
   return undefined;
 }
 
@@ -166,7 +167,7 @@ export function createRemoteStateReporter(
         );
       }
     } catch (err) {
-      console.warn(`[beeper] remote state ${state.state_event} failed:`, (err as Error).message);
+      console.warn(`[beeper] remote state ${state.state_event} failed:`, errorMessage(err));
     }
   };
 }

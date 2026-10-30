@@ -12,6 +12,7 @@ import { mentionsFromUserIds, parseOutboundMentions } from './mentions.ts';
 import type { MappingStore, PortalRow } from './mapping-store.ts';
 import type { PuppetRegistry } from './puppet-registry.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
+import { errorMessage } from '../error-message.ts';
 
 /** Removes the Matrix rich-reply fallback ("> <@user> quoted text" lines + blank line). */
 export function stripReplyFallback(body: string): string {
@@ -251,7 +252,7 @@ export class OutboundHandler {
       } catch (quoteErr) {
         if (!quote) throw quoteErr;
         // A stale/incompatible quote payload can be rejected — degrade to a plain send
-        console.warn('[outbound] quoted send failed, retrying without quote:', (quoteErr as Error).message);
+        console.warn('[outbound] quoted send failed, retrying without quote:', errorMessage(quoteErr));
         disarmGuards();
         sendResult = await this.deps.zalo.sendText(
           portal.thread_id,
@@ -267,7 +268,7 @@ export class OutboundHandler {
       else if (event.event_id) this.deps.store.markOutboundHandled(event.event_id, event.room_id);
     } catch (err) {
       disarmGuards();
-      await this.notice(event.room_id, `⚠ Failed to deliver to Zalo: ${(err as Error).message}`);
+      await this.notice(event.room_id, `⚠ Failed to deliver to Zalo: ${errorMessage(err)}`);
     }
     return true;
   }
@@ -358,10 +359,7 @@ export class OutboundHandler {
     } catch (err) {
       if (imageGuardArmed) this.deps.echo.cancelImage(portal.thread_id);
       if (captionGuard) this.deps.echo.cancel(portal.thread_id, captionGuard);
-      await this.notice(
-        portal.room_id,
-        `⚠ Failed to send ${msgtype.replace('m.', '')} to Zalo: ${(err as Error).message}`,
-      );
+      await this.notice(portal.room_id, `⚠ Failed to send ${msgtype.replace('m.', '')} to Zalo: ${errorMessage(err)}`);
     }
   }
 
@@ -387,7 +385,7 @@ export class OutboundHandler {
         relation.key,
       );
     } catch (err) {
-      console.warn('outbound reaction failed:', (err as Error).message);
+      console.warn('outbound reaction failed:', errorMessage(err));
     }
     return true;
   }
@@ -414,7 +412,7 @@ export class OutboundHandler {
       // cliMsgId 0 is accepted by Zalo's undo endpoint (verified live: status 0)
       await this.deps.zalo.recall(portal.thread_id, portal.thread_type, target.zaloMsgId, target.cliMsgId ?? '0');
     } catch (err) {
-      await this.notice(portal.room_id, `⚠ Zalo recall failed: ${(err as Error).message}`);
+      await this.notice(portal.room_id, `⚠ Zalo recall failed: ${errorMessage(err)}`);
     }
     return true;
   }
@@ -429,6 +427,6 @@ export class OutboundHandler {
     await this.deps.bridge
       .getIntent()
       .sendMessage(roomId, { msgtype: 'm.notice', body })
-      .catch((err: Error) => console.warn(`notice to ${roomId} failed:`, err.message));
+      .catch((err: unknown) => console.warn(`notice to ${roomId} failed:`, errorMessage(err)));
   }
 }
