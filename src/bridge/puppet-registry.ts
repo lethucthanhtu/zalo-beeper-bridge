@@ -3,6 +3,7 @@ import type { Bridge, Intent } from 'matrix-appservice-bridge';
 import { fetchMediaCapped } from './media-handler.ts';
 import type { MappingStore } from './mapping-store.ts';
 import type { ZaloProfile } from '../zalo/types.ts';
+import { errorMessage } from '../error-message.ts';
 
 /** Default ghost localpart prefix (bridge registered as `sh-zalo`). */
 export const GHOST_PREFIX = 'sh-zalo_';
@@ -114,7 +115,7 @@ export class PuppetRegistry {
     if (nameChanged && name) {
       await intent
         .setDisplayName(name)
-        .catch((err: Error) => console.warn(`setDisplayName(${mxid}) failed:`, err.message));
+        .catch((err: unknown) => console.warn(`setDisplayName(${mxid}) failed:`, errorMessage(err)));
     }
     // Avatar: synced once per puppet (Zalo avatars change rarely). A contact whose
     // profile has no avatar is re-checked at most once per PROFILE_RECHECK_MS instead of
@@ -125,8 +126,8 @@ export class PuppetRegistry {
       !this.store.isProfileFresh(zaloUid, PROFILE_RECHECK_MS)
     ) {
       // Reuse the name lookup's profile: one Zalo request per new contact, not two
-      await this.syncAvatar(zaloUid, intent, profile).catch((err: Error) =>
-        console.warn(`avatar sync(${mxid}) failed:`, err.message),
+      await this.syncAvatar(zaloUid, intent, profile).catch((err: unknown) =>
+        console.warn(`avatar sync(${mxid}) failed:`, errorMessage(err)),
       );
     }
     return intent;
@@ -179,8 +180,8 @@ export class PuppetRegistry {
     const result = { named: 0, withAvatar: 0, checked: 0, complete: true };
     for (let start = 0; start < pending.length; start += batchSize) {
       const batch = pending.slice(start, start + batchSize);
-      const profiles = await fetchProfiles(batch).catch((err: Error) => {
-        console.warn('[bridge] profile repair lookup failed:', err.message);
+      const profiles = await fetchProfiles(batch).catch((err: unknown) => {
+        console.warn('[bridge] profile repair lookup failed:', errorMessage(err));
         return null;
       });
       if (!profiles) {
@@ -200,11 +201,11 @@ export class PuppetRegistry {
           await intent
             .setDisplayName(profile.displayName)
             .then(() => result.named++)
-            .catch((err: Error) => console.warn(`setDisplayName(${uid}) failed:`, err.message));
+            .catch((err: unknown) => console.warn(`setDisplayName(${uid}) failed:`, errorMessage(err)));
         }
         const hadAvatar = this.store.getPuppetAvatarUrl(uid) !== null;
-        await this.applyAvatar(uid, intent, profile.avatarUrl).catch((err: Error) =>
-          console.warn(`avatar sync(${uid}) failed:`, err.message),
+        await this.applyAvatar(uid, intent, profile.avatarUrl).catch((err: unknown) =>
+          console.warn(`avatar sync(${uid}) failed:`, errorMessage(err)),
         );
         if (!hadAvatar && this.store.getPuppetAvatarUrl(uid) !== null) result.withAvatar++;
       }

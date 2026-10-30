@@ -14,6 +14,8 @@ export default tseslint.config(
       // An un-awaited, un-voided promise loses its error: every fire-and-forget is explicit
       '@typescript-eslint/no-floating-promises': 'error',
       '@typescript-eslint/no-misused-promises': 'error',
+      // .catch callbacks get unknown, like catch clauses: anything can be thrown (use errorMessage())
+      '@typescript-eslint/use-unknown-in-catch-callback-variable': 'error',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
       // House style: object shapes are `type` aliases, never `interface`
       '@typescript-eslint/consistent-type-definitions': ['error', 'type'],

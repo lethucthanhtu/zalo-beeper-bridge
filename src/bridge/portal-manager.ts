@@ -7,6 +7,7 @@ import type { MappingStore, PortalRow } from './mapping-store.ts';
 import { ownerIntent } from './owner-intent.ts';
 import type { PuppetRegistry } from './puppet-registry.ts';
 import type { ZaloThreadType } from '../zalo/types.ts';
+import { errorMessage } from '../error-message.ts';
 
 /** What PortalManager needs to know about a thread to find or create its portal. */
 export type PortalContext = {
@@ -73,7 +74,7 @@ export class PortalManager {
         // Not Intent.leave(): that goes through bot-sdk's own ensureRegistered → M_EXCLUSIVE
         await ownerIntent(this.bridge, this.ownerUserId).matrixClient.leaveRoom(portal.room_id);
       } catch (err) {
-        console.warn(`[bridge] owner leave ${portal.room_id} failed:`, (err as Error).message);
+        console.warn(`[bridge] owner leave ${portal.room_id} failed:`, errorMessage(err));
       }
       this.store.deletePortal(portal.thread_id);
       removed++;
@@ -168,7 +169,7 @@ export class PortalManager {
       await ownerIntent(this.bridge, this.ownerUserId).join(roomId);
       this.ownerJoined.add(roomId);
     } catch (err) {
-      console.warn(`[bridge] owner auto-join ${roomId} failed (manual accept needed):`, (err as Error).message);
+      console.warn(`[bridge] owner auto-join ${roomId} failed (manual accept needed):`, errorMessage(err));
     }
   }
 
@@ -273,7 +274,7 @@ export class PortalManager {
     if (displayName) {
       await ghostIntent
         .setRoomUserProfile(roomId, { displayname: displayName })
-        .catch((err: Error) => console.warn(`setRoomUserProfile(${ghostMxid}) failed:`, err.message));
+        .catch((err: unknown) => console.warn(`setRoomUserProfile(${ghostMxid}) failed:`, errorMessage(err)));
     }
     this.ghostJoined.add(joinKey);
   }

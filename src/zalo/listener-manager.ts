@@ -7,6 +7,7 @@
 // so resetting on "connected" would loop at 5s forever without ever escalating.
 import { EventEmitter } from 'node:events';
 import type { API } from 'zca-js';
+import { errorMessage } from '../error-message.ts';
 
 // CloseReason values from zca-js (no enum imports — erasableSyntaxOnly)
 const MANUAL_CLOSURE = 1000;
@@ -73,7 +74,7 @@ export class ListenerManager extends EventEmitter<ListenerManagerEvents> {
       // zca-js emits "error" for ws failures AND malformed inbound payloads;
       // with no listener attached, EventEmitter would crash the process.
       error: (err) => {
-        console.error('[zalo] listener error:', err instanceof Error ? err.message : err);
+        console.error('[zalo] listener error:', errorMessage(err));
       },
     };
     api.listener.on('connected', this.handlers.connected);
@@ -135,7 +136,7 @@ export class ListenerManager extends EventEmitter<ListenerManagerEvents> {
         this.api?.listener.start({ retryOnClose: true });
       } catch (err) {
         // zca-js throws "Already started" if a socket is somehow live — treat as recovered
-        console.warn('[zalo] listener restart skipped:', (err as Error).message);
+        console.warn('[zalo] listener restart skipped:', errorMessage(err));
       }
     }, delayMs);
   }

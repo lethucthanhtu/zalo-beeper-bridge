@@ -61,6 +61,7 @@ import { PortalManager } from '../bridge/portal-manager.ts';
 import { bridgeIdFor, PuppetRegistry } from '../bridge/puppet-registry.ts';
 import { loadRegistration } from '../matrix/appservice.ts';
 import { bridgeBranding } from '../matrix/network-branding.ts';
+import { errorMessage } from '../error-message.ts';
 
 // ---------------------------------------------------------------------------
 // Constants, CLI parsing and small helpers
@@ -529,7 +530,7 @@ async function prepareSenders(
     } catch (err) {
       if (threadType === 'user') throw err; // the DM peer created the room — nothing to fall back to
       failedGhosts.add(uid);
-      console.warn(`[import] ghost ${uid} unavailable in ${key}, sending as bot:`, (err as Error).message);
+      console.warn(`[import] ghost ${uid} unavailable in ${key}, sending as bot:`, errorMessage(err));
     }
   }
   return failedGhosts;
@@ -601,8 +602,8 @@ async function rebuild(key: string): Promise<number> {
   } catch (err) {
     // Not repointed → the half-filled room is unreachable: drop it, the old room stays
     if (!store.isPortalRoom(portal.room_id)) {
-      await removeRoom(portal.room_id, threadId, threadType).catch((removeErr: Error) =>
-        console.warn(`[import] could not drop partial room ${portal.room_id}:`, removeErr.message),
+      await removeRoom(portal.room_id, threadId, threadType).catch((removeErr: unknown) =>
+        console.warn(`[import] could not drop partial room ${portal.room_id}:`, errorMessage(removeErr)),
       );
     }
     throw err;
@@ -744,7 +745,7 @@ async function readLiveEvents(roomIds: string[], knownMsgIds: Set<string>, skip:
         const replyToMsgId = replyToEventId ? store.getZaloTargetByEventId(replyToEventId)?.zaloMsgId : undefined;
         liveItems.push({ kind: 'live', ts: raw.origin_server_ts, row, raw, ...(replyToMsgId ? { replyToMsgId } : {}) });
       } catch (err) {
-        console.warn(`[import] could not read live event ${row.eventId} (${row.msgId}):`, (err as Error).message);
+        console.warn(`[import] could not read live event ${row.eventId} (${row.msgId}):`, errorMessage(err));
       }
     }
   }
@@ -946,7 +947,7 @@ async function removeRoom(roomId: string, threadId: string, threadType: 'user' |
       outcome = `deleted (as ${intent.userId})`;
       break;
     } catch (err) {
-      console.warn(`[retire] delete ${roomId} as ${intent.userId} failed:`, (err as Error).message);
+      console.warn(`[retire] delete ${roomId} as ${intent.userId} failed:`, errorMessage(err));
     }
   }
   if (!outcome) {
@@ -998,8 +999,8 @@ for (const key of rowsByKey.keys()) {
     } else if (cliOptions.rebuild && after === before)
       console.log(`[import] ${key}: nothing to rebuild, room unchanged`);
   } catch (err) {
-    failures.push(`${key}: ${(err as Error).message}`);
-    console.error(`[import] ${key} failed:`, (err as Error).message);
+    failures.push(`${key}: ${errorMessage(err)}`);
+    console.error(`[import] ${key} failed:`, errorMessage(err));
   }
 }
 

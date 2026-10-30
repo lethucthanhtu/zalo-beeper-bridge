@@ -18,6 +18,7 @@ import { ownerIntent } from './owner-intent.ts';
 import type { PortalManager } from './portal-manager.ts';
 import type { PuppetRegistry } from './puppet-registry.ts';
 import type { ZaloMessage } from '../zalo/types.ts';
+import { errorMessage } from '../error-message.ts';
 
 /** Collaborators and settings the inbound pipeline needs. */
 export type InboundHandlerDeps = {
@@ -61,7 +62,7 @@ export class InboundHandler {
     const previous = this.threadQueues.get(msg.threadId) ?? Promise.resolve();
     const next = previous
       .then(() => this.process(msg))
-      .catch((err) => console.error(`[bridge] inbound ${msg.msgId} failed:`, err instanceof Error ? err.message : err))
+      .catch((err: unknown) => console.error(`[bridge] inbound ${msg.msgId} failed:`, errorMessage(err)))
       .finally(() => {
         if (this.threadQueues.get(msg.threadId) === next) this.threadQueues.delete(msg.threadId);
       });
@@ -201,7 +202,7 @@ export class InboundHandler {
           const caption = msg.content.caption ? `${msg.content.caption}\n` : '';
           const sent = await intent.sendMessage(portal.room_id, {
             msgtype: 'm.notice',
-            body: `${caption}[Zalo photo could not be bridged: ${(err as Error).message}]`,
+            body: `${caption}[Zalo photo could not be bridged: ${errorMessage(err)}]`,
             ...extraContent,
           });
           eventId = sent.event_id;
