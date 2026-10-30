@@ -91,8 +91,10 @@ function parseJson(value: unknown): JsonObject {
 /** Joins the non-blank parts with newlines (undefined and whitespace-only parts are skipped). */
 const joinLines = (...parts: Array<string | undefined>): string =>
   parts.filter((part) => part && part.trim()).join('\n');
+/** True for an http(s) URL. */
+const isHttpUrl = (url: string) => /^https?:\/\//.test(url);
 /** Order-preserving de-duplication of the http(s) URLs; empty and non-http entries are dropped. */
-const uniqueHttpUrls = (urls: string[]): string[] => [...new Set(urls.filter((url) => /^https?:\/\//.test(url)))];
+const uniqueHttpUrls = (urls: string[]): string[] => [...new Set(urls.filter(isHttpUrl))];
 
 /** Human-readable size ("367 KB", "1.5 MB") for the file fallback text; '' when unknown. */
 function formatBytes(byteCount: number): string {
@@ -264,7 +266,7 @@ function render(row: ExportRow): Rendered {
       const href = asText(attachment.href);
       const label = title && title !== href ? title : asText(params.mediaTitle) || desc;
       const body = joinLines(label && label !== href ? label : undefined, href) || '[Liên kết]';
-      if (!/^https?:\/\//.test(href)) return { body, notice: false };
+      if (!isHttpUrl(href)) return { body, notice: false };
       // Zalo card fields: title is the page title (or the URL itself), description the summary
       const pageTitle = asText(params.mediaTitle) || (title && title !== href ? title : '');
       const summary = desc && desc !== href && desc !== pageTitle ? desc : '';
@@ -276,7 +278,7 @@ function render(row: ExportRow): Rendered {
           url: href,
           ...(pageTitle ? { title: pageTitle } : {}),
           ...(summary ? { description: summary } : {}),
-          ...(/^https?:\/\//.test(thumb) ? { imageUrl: thumb } : {}),
+          ...(isHttpUrl(thumb) ? { imageUrl: thumb } : {}),
         },
       };
     }

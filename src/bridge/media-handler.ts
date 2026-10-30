@@ -1,6 +1,6 @@
-// Inbound media pipeline: Zalo CDN URL → download → Matrix content repo → m.image.
-// Phase 1 verified the CDN is public (no session headers), but URLs may expire —
-// always download immediately on event receipt.
+// Media transfer: guarded Zalo CDN downloads → Matrix content repo (photos, stickers), plus
+// the authenticated Matrix media download used for outbound sends. Zalo CDN URLs are public
+// (no session headers) but expire — always download immediately on event receipt.
 import type { Intent } from 'matrix-appservice-bridge';
 import { animatedSticker } from './animated-sticker.ts';
 
@@ -86,6 +86,17 @@ export async function downloadMatrixMedia(
   });
   if (!response.ok) throw new Error(`matrix media download failed: HTTP ${response.status}`);
   if (!response.body) throw new Error('matrix media download returned no body');
+  return readCapped(response, maxBytes);
+}
+
+/**
+ * Streams a response body into memory with a hard size cap (content-length can be spoofed,
+ * so it is never trusted for allocation).
+ *
+ * @returns the bytes and the declared mimetype (parameters stripped; `application/octet-stream` when absent)
+ * @throws once more than `maxBytes` arrive
+ */
+async function readCapped(response: Response, maxBytes: number): Promise<FetchedMedia> {
   const chunks: Uint8Array[] = [];
   let receivedBytes = 0;
   for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
@@ -152,19 +163,7 @@ export async function fetchMediaCapped(
   if (/^(text\/html|application\/json)/.test(response.headers.get('content-type') ?? '')) {
     throw new Error('media download returned an error page');
   }
-
-  // Stream with a cap — content-length can be spoofed, never trust it for allocation
-  const chunks: Uint8Array[] = [];
-  let receivedBytes = 0;
-  for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
-    receivedBytes += chunk.byteLength;
-    if (receivedBytes > maxBytes) throw new Error(`media exceeds size cap (>${maxBytes} bytes)`);
-    chunks.push(chunk);
-  }
-  return {
-    buffer: Buffer.concat(chunks),
-    mimetype: response.headers.get('content-type')?.split(';')[0] ?? 'application/octet-stream',
-  };
+  return readCapped(response, maxBytes);
 }
 
 // Sticker mxc cache — the same sticker id is sent many times; upload once per run
@@ -234,7 +233,8 @@ export async function bridgeInboundPhoto(
   maxBytes: number,
   extra?: Record<string, unknown>,
 ): Promise<MediaResult> {
-  const { buffer, mimetype } = await fetchMediaCapped(photo.url, maxBytes);
+  const { buffer, mimetype: declared } = await fetchMediaCapped(photo.url, maxBytes);
+  const mimetype = sniffMimetype(buffer, declared); // Zalo labels GIF photos image/jpeg
   const extension = mimetype.split('/')[1]?.split(';')[0] ?? 'jpg';
   const mxcUrl = await intent.uploadContent(buffer, { type: mimetype, name: `zalo-photo.${extension}` });
   // MSC2530 caption: body = caption, filename = the actual file name. filename is always

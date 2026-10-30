@@ -9,6 +9,7 @@
 // (Field precedence is inferred from mautrix-go; Beeper's client is closed-source.)
 import fs from 'node:fs';
 import type { Bridge, Intent } from 'matrix-appservice-bridge';
+import { bridgeIdFor } from '../bridge/puppet-registry.ts';
 import type { ZaloThreadType } from '../zalo/types.ts';
 
 /** How the bridge presents itself in Beeper: config `network` section + the computed state key. */
@@ -19,46 +20,23 @@ export type NetworkBranding = {
   networkId: string;
   /** `<homeserver_domain>/<registration id>` — the bridge-info state_key */
   stateKey: string;
-  /** state keys used by earlier versions (e.g. `beeper.local/sh-zalo`); their events are cleared */
-  legacyStateKeys?: string[];
 };
 
 /**
  * Branding for this bridge: the config's `network` section plus the bridge-info state
- * key `<domain>/<registration id>` (as mautrix bridgev2 computes it). The old
- * `<domain>/<sender_localpart minus "bot">` key is listed as legacy so its events get
- * cleared. Without a registration id the legacy key stays the state key.
+ * key `<domain>/<registration id>` (as mautrix bridgev2 computes it); without a
+ * registration id, `<domain>/<bridge name>`.
  */
 export function bridgeBranding(
   config: { matrix: { domain: string }; network: { name: string; logoPath: string; networkId: string } },
-  registration: { id?: string; sender_localpart?: string },
+  registration: { id?: string | null; sender_localpart?: string | null },
 ): NetworkBranding {
-  const legacyKey = `${config.matrix.domain}/${(registration.sender_localpart ?? 'sh-zalobot').replace(/bot$/, '')}`;
-  const stateKey = registration.id ? `${config.matrix.domain}/${registration.id}` : legacyKey;
-  return { ...config.network, stateKey, legacyStateKeys: [legacyKey] };
+  const bridgeId = registration.id || bridgeIdFor(registration.sender_localpart ?? undefined);
+  return { ...config.network, stateKey: `${config.matrix.domain}/${bridgeId}` };
 }
 
 /** Bridge-info state event types Beeper reads (current + legacy half-shot name). */
 const BRIDGE_EVENT_TYPES = ['m.bridge', 'uk.half-shot.bridge'];
-
-/**
- * Empties bridge-info events left under an outdated state key, so a room carries one
- * consistent bridge description. Only rooms that still have such an event get a write.
- * Best-effort: failures are logged.
- */
-async function clearLegacyBridgeInfo(intent: Intent, roomId: string, legacyStateKeys: string[]): Promise<void> {
-  for (const stateKey of legacyStateKeys) {
-    for (const eventType of BRIDGE_EVENT_TYPES) {
-      const existing = (await intent.matrixClient
-        .getRoomStateEvent(roomId, eventType, stateKey)
-        .catch(() => null)) as Record<string, unknown> | null;
-      if (!existing || Object.keys(existing).length === 0) continue;
-      await intent
-        .sendStateEvent(roomId, eventType, stateKey, {})
-        .catch((err: Error) => console.warn(`clearing legacy ${eventType} failed for ${roomId}:`, err.message));
-    }
-  }
-}
 
 /** mxc:// URL of the uploaded network logo; uploaded once per process. */
 let cachedLogoMxc: string | null = null;
@@ -155,6 +133,4 @@ export async function tagPortalNetwork(
       .sendStateEvent(roomId, eventType, branding.stateKey, content)
       .catch((err: Error) => console.warn(`${eventType} state failed for ${roomId}:`, err.message));
   }
-  const legacyKeys = (branding.legacyStateKeys ?? []).filter((key) => key !== branding.stateKey);
-  if (legacyKeys.length) await clearLegacyBridgeInfo(intent, roomId, legacyKeys);
 }

@@ -10,7 +10,7 @@ It also ships a **history importer** that moves your full Zalo history (from Zal
 
 | Area                             |                       Zalo → Beeper                        |                Beeper → Zalo                |
 | -------------------------------- | :--------------------------------------------------------: | :-----------------------------------------: |
-| Text (DM + group)                |                             ✅                             |                     ✅                      |
+| Text (DM + group)                |                    ✅ (incl. rich text)                    |                     ✅                      |
 | @mentions                        |                         ✅ (pills)                         |                     ✅                      |
 | Replies / quotes                 |                             ✅                             |                     ✅                      |
 | Photos                           |                             ✅                             |                     ✅                      |
@@ -18,21 +18,25 @@ It also ships a **history importer** that moves your full Zalo history (from Zal
 | GIFs                             |                             ✅                             |                      —                      |
 | Videos                           |                       ✅ (`m.video`)                       |                     ✅                      |
 | Files                            |                       ✅ (`m.file`)                        |                     ✅                      |
-| Voice messages                   |                 ✅ (`m.audio` voice note)                  |             ✅ (sent as a file)             |
-| Link cards                       |               ✅ text + Beeper link preview                |                      —                      |
+| Voice messages                   |                 ✅ (`m.audio` voice note)                  | ✅ voice note (AAC); other codecs as a file |
+| Link cards                       |               ✅ text + Beeper link preview                |      ✅ Zalo builds its own link card       |
 | Locations                        | ✅ `m.location` (map preview, opens the device's maps app) |                      —                      |
 | Contact cards (danh thiếp)       |       ✅ QR code + name, phone and a `zalo.me` link        |                      —                      |
 | Web cards (`chat.webcontent`)    |               ✅ text (title + description)                |                      —                      |
 | Reactions                        |                             ✅                             |                     ✅                      |
 | Message recall                   |                             —                              |                     ✅                      |
-| Read receipts                    |                             ✅                             |                     ✅                      |
-| Typing indicators                |                             ✅                             | disabled (handler kept, see `src/index.ts`) |
+| Read receipts                    |                             ✅                             |    ✅ (follows Beeper's receipt setting)    |
+| Typing indicators                |                             ✅                             |    ✅ (follows Beeper's typing setting)     |
 | Own messages sent from the phone |                    ✅ (double-puppeted)                    |                     n/a                     |
 | End-to-end encrypted Zalo chats  |             notice only (cannot be decrypted)              |                      —                      |
 
 Live videos / files / voice / GIFs and link previews share their rendering with the history importer, where it was verified on real chats; for live messages they are covered by unit tests of the payload parsing. Locations and contact cards are parsed from captured live payloads; the `chat.webcontent` shape is not confirmed yet — unknown message types log their field **names** (never values) so they can be added.
 
-Photos without a caption show no caption (the file name is never used as one). A contact card shows the contact's QR code with name and phone; the `zalo.me/<phone>` link opens the Zalo app on a phone (no link when the contact hides the number — scan the QR instead).
+Photos without a caption show no caption (the file name is never used as one), in both directions: a Beeper photo without a `filename` field (Beeper iOS) is sent to Zalo without a caption.
+
+A Beeper message with a link (and no reply or @mention) is sent with Zalo's link API, so Zalo shows its own preview card; when Zalo cannot parse the link it goes out as plain text. A Zalo link message shows in Beeper as the text the sender typed (e.g. a short `maps.app.goo.gl` link), with the page title, description and thumbnail Zalo resolved as the Beeper preview. Rich text (bold, colours, or text Zalo formats itself, e.g. with many @mentions) arrives as plain text with its mentions; the styling is dropped.
+
+Typing indicators and read receipts go to Zalo exactly when Beeper sends them: turn off typing notifications or read receipts in Beeper's settings and nothing is mirrored (Beeper then sends no typing events, and only private receipts, which the bridge ignores). A contact card shows the contact's QR code with name and phone; the `zalo.me/<phone>` link opens the Zalo app on a phone (no link when the contact hides the number — scan the QR instead).
 
 Plus: ghost users with real names + avatars, portal rooms auto-created on first message, a `sync` command for pinned conversations and groups, Zalo network branding (name + logo), listener auto-reconnect with ban-suspicion pause, conservative outbound rate limiting, encrypted credential storage at rest, and the [history importer](#importing-zalo-history).
 
@@ -90,7 +94,7 @@ bridge:
   dbPath: bridge.db
   mediaMaxBytes: 10485760 # photos / stickers / previews; videos & files allow up to 100 MB
 logging:
-  level: info
+  level: warn # matrix-appservice-bridge's log level; info also logs every HTTP request
 ```
 
 ### 3. Run
@@ -335,13 +339,16 @@ bbctl proxy  ──►  Beeper Matrix server  ──►  Beeper clients
 - **Shared media rendering** (`src/bridge/media-content.ts`): one code path builds `m.image` / `m.video` / `m.file` / `m.audio` / `m.sticker` events and link previews for both live messages and the importer.
 - **Animated stickers** (`src/bridge/animated-sticker.ts`): Zalo returns no animated sticker URL for classic stickers; like Zalo PC, the bridge steps through the public sprite strip and encodes a looping WebP (libwebp via `wasm-webp`), with frame timing from `assets/zalo-sticker-timing.json`.
 - **Echo suppression:** outbound sends are matched against their own `selfListen` echo (by `msgId`, with a content/URL fallback) so the bridge never re-posts what you just sent.
+- **Beeper account state** (`src/matrix/beeper-bridge-state.ts`): Beeper lists a bridge's chats only while its remote-account state is published. The bridge posts it on every listener transition (`CONNECTED`, `TRANSIENT_DISCONNECT`, `BAD_CREDENTIALS` when the session dies, `LOGGED_OUT` on `logout`) and re-posts it every minute, because a `bbctl proxy` (re)connect can wipe it — with the old 10-minute re-post Beeper Desktop showed the network with no chats for up to 10 minutes after a restart. `bbctl whoami --raw` shows it under `remoteState`.
+- **Network branding** (`src/matrix/network-branding.ts`): the bot profile (`com.beeper.bridge.*`) and each portal's `m.bridge` / `uk.half-shot.bridge` state (keyed `<domain>/<registration id>`, with `com.beeper.room_type.v2` and `fi.mau.receiver`) give Beeper the network name "Zalo" and file the chats under it. The small network badge on chat avatars is drawn by Beeper's apps for bridge types they know; self-hosted bridges register as the generic type `bridgev2`, so the badge stays generic (a self-hosted mautrix Teams bridge shows the same).
+- **Provisioning probe:** hungryserv asks a self-hosted bridge for `/_matrix/provision/v3/capabilities` on each proxy connect (`bbctl proxy` forwards every proxied request as `PUT`). The bridge answers "no start-chat / group-creation features"; any other proxied path is logged as `[appservice] unhandled …`.
 - **Double-puppeting:** on Beeper's single-tenant hungryserv the appservice token can act as the owner, so messages you send from the Zalo phone app appear in Beeper on the right-hand side.
 
 ## Development
 
 ```bash
-npm run typecheck     # tsc, strict, no emit
-npm run lint          # eslint (flat config)
+npm run typecheck     # tsc strict (+ noUncheckedIndexedAccess, noUnused*, noImplicitReturns/Override), no emit
+npm run lint          # eslint flat config, type-aware: no floating or misused promises
 npm test              # vitest
 ```
 

@@ -3,13 +3,16 @@ import { toMatrixWaveform, type MediaDescriptor } from '../bridge/media-content.
 import type { RawZaloMessage, ZaloContent, ZaloMessage } from './types.ts';
 import { CALL_ACTIONS, describeCall } from './call-message.ts';
 
-/** chat.photo content shape observed in fixtures */
-type PhotoContent = {
+/** Object-form message content (media, cards, rich text); every field is optional. */
+type AttachmentContent = {
   href?: string;
   thumb?: string;
-  params?: string; // JSON string: {width, height, hd, ...}
-  title?: string; // Zalo puts the photo caption here
+  title?: string;
   description?: string;
+  /** JSON string (dimensions, sizes, mediaTitle, ...) — read with parseParams */
+  params?: string;
+  /** card kind: 'rtf', 'recommened.link', 'recommened.user', call actions, ... */
+  action?: string;
 };
 
 type StickerContent = {
@@ -26,89 +29,85 @@ type StickerContent = {
  * @param content raw content: a string for text, an object for everything else
  */
 function normalizeContent(msgType: string, content: unknown): ZaloContent {
-  if (msgType === 'webchat' && typeof content === 'string') {
-    return { kind: 'text', text: content };
+  if (msgType === 'webchat' && typeof content === 'string') return { kind: 'text', text: content };
+  if (typeof content !== 'object' || content === null) return { kind: 'unsupported', msgType };
+  const card = content as AttachmentContent;
+  // Rich text (bold/colour, or text Zalo formats itself, e.g. many @mentions): the plain
+  // text is in the title. shortcut: styles in params are dropped, map them to HTML if wanted
+  if (msgType === 'webchat' && card.action === 'rtf' && typeof card.title === 'string') {
+    return { kind: 'text', text: card.title };
   }
-  if (msgType === 'chat.photo' && typeof content === 'object' && content !== null) {
-    const photo = content as PhotoContent;
-    if (photo.href) {
-      let width: number | undefined;
-      let height: number | undefined;
-      try {
-        const params = JSON.parse(photo.params ?? '{}') as { width?: number; height?: number };
-        width = params.width;
-        height = params.height;
-      } catch {
-        // params malformed — dimensions are optional
-      }
-      return {
-        kind: 'photo',
-        url: photo.href,
-        thumbUrl: photo.thumb,
-        width,
-        height,
-        caption: [photo.title, photo.description].find((text) => text && !FILE_NAME.test(text)) || undefined,
-      };
-    }
+  if (msgType === 'chat.photo' && card.href) {
+    const params = parseParams(card.params);
+    return {
+      kind: 'photo',
+      url: card.href,
+      thumbUrl: card.thumb,
+      width: positive(params.width),
+      height: positive(params.height),
+      // Zalo puts the photo caption in the title; a bare file name is not a caption
+      caption: [card.title, card.description].find((text) => text && !FILE_NAME.test(text)) || undefined,
+    };
   }
-  if (msgType === 'chat.sticker' && typeof content === 'object' && content !== null) {
+  if (msgType === 'chat.sticker') {
     const sticker = content as StickerContent;
     if (typeof sticker.id === 'number' && typeof sticker.catId === 'number') {
       return { kind: 'sticker', id: sticker.id, catId: sticker.catId };
     }
   }
-  if (typeof content === 'object' && content !== null) {
-    // Call log bubbles are link cards without an href — render them as a call line
-    const card = content as AttachmentContent & { action?: string };
-    if (card.action && CALL_ACTIONS.has(card.action)) {
-      return { kind: 'notice', text: describeCall(card.action, card.params) };
-    }
-    const media = normalizeMedia(msgType, content as AttachmentContent);
-    if (media) return { kind: 'media', media };
-    if (msgType === 'chat.location.new') return normalizeLocation(content as AttachmentContent);
-    // Contact card ("danh thiếp"; Zalo's own typo): the href is a placeholder (zaloapp.com)
-    if (card.action === 'recommened.user') return normalizeContactCard(card);
-    // Web cards (OA / mini-app / payment cards) with no href: render their label as text;
-    // with an href they fall through to the link-card branch below
-    if (WEB_CONTENT_TYPES.has(msgType) && !card.href) {
-      const text = [card.title, card.description].filter(Boolean).join('\n');
-      return { kind: 'text', text: text || '[Zalo web card — open Zalo to view]' };
-    }
+  // Call log bubbles are link cards without an href — render them as a call line
+  if (card.action && CALL_ACTIONS.has(card.action)) {
+    return { kind: 'notice', text: describeCall(card.action, card.params) };
   }
-  // Link/card types (chat.recommended, chat.link, chat.ecard, ...) carry an href +
-  // title/description — a text line with the URL plus a Beeper link preview.
-  if (typeof content === 'object' && content !== null) {
-    const card = content as AttachmentContent;
-    if (card.href) {
-      const params = parseParams(card.params);
-      const label = card.title || card.description || '';
-      const text = label && !label.includes(card.href) ? `${label}\n${card.href}` : card.href;
-      const title =
-        (typeof params.mediaTitle === 'string' && params.mediaTitle) ||
-        (card.title && card.title !== card.href ? card.title : '');
-      const description =
-        card.description && card.description !== card.href && card.description !== title ? card.description : '';
-      const linkPreview = /^https?:\/\//.test(card.href)
-        ? {
-            url: card.href,
-            ...(title ? { title } : {}),
-            ...(description ? { description } : {}),
-            ...(card.thumb && /^https?:\/\//.test(card.thumb) ? { imageUrl: card.thumb } : {}),
-          }
-        : undefined;
-      return { kind: 'text', text, ...(linkPreview ? { linkPreview } : {}) };
-    }
+  const media = normalizeMedia(msgType, card);
+  if (media) return { kind: 'media', media };
+  if (msgType === 'chat.location.new') return normalizeLocation(card);
+  // Contact card ("danh thiếp"; Zalo's own typo): the href is a placeholder (zaloapp.com)
+  if (card.action === 'recommened.user') return normalizeContactCard(card);
+  // Web cards (OA / mini-app / payment cards) with no href: render their label as text;
+  // with an href they are link cards like the rest
+  if (WEB_CONTENT_TYPES.has(msgType) && !card.href) {
+    const text = [card.title, card.description].filter(Boolean).join('\n');
+    return { kind: 'text', text: text || '[Zalo web card — open Zalo to view]' };
   }
+  if (card.href) return normalizeLinkCard({ ...card, href: card.href });
   return { kind: 'unsupported', msgType };
 }
 
-type AttachmentContent = {
-  href?: string;
-  thumb?: string;
-  title?: string;
-  description?: string;
-  params?: string;
-};
+/**
+ * Link/card types (chat.recommended, chat.link, chat.ecard, ...) → a text line plus a
+ * Beeper link preview. In link messages the title is the text the sender typed (with the
+ * link as typed, e.g. a short maps.app.goo.gl link) and href the resolved URL: show the
+ * typed text, as Beeper does, and preview the typed URL. mediaTitle is the page title.
+ */
+function normalizeLinkCard(card: AttachmentContent & { href: string }): ZaloContent {
+  const params = parseParams(card.params);
+  const typedUrl = card.title?.match(/https?:\/\/\S+/)?.[0];
+  const label = card.title || card.description || '';
+  const text = typedUrl ? card.title! : label && !label.includes(card.href) ? `${label}\n${card.href}` : card.href;
+  const previewUrl = typedUrl ?? card.href;
+  /** Zalo repeats the URL as title/description when the page has none — not preview text. */
+  const isUrl = (value: string) => value === card.href || value === previewUrl;
+  const title =
+    (typeof params.mediaTitle === 'string' && !isUrl(params.mediaTitle) && params.mediaTitle) ||
+    (card.title && !typedUrl && !isUrl(card.title) ? card.title : '');
+  const description =
+    card.description && !isUrl(card.description) && card.description !== title ? card.description : '';
+  if (!isHttpUrl(card.href)) return { kind: 'text', text };
+  return {
+    kind: 'text',
+    text,
+    linkPreview: {
+      url: previewUrl,
+      ...(title ? { title } : {}),
+      ...(description ? { description } : {}),
+      ...(card.thumb && isHttpUrl(card.thumb) ? { imageUrl: card.thumb } : {}),
+    },
+  };
+}
+
+/** True for an http(s) URL (Zalo also uses placeholders like "www.zaloapp.com"). */
+const isHttpUrl = (url: string) => /^https?:\/\//.test(url);
 
 /**
  * Parses the JSON-encoded `params` string Zalo attaches to media/card content.

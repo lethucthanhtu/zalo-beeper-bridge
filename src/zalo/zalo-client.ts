@@ -12,6 +12,7 @@ import type {
   RawZaloMessage,
   ZaloMention,
   ZaloMessage,
+  ZaloProfile,
   ZaloQuotePayload,
   ZaloReactionEvent,
   ZaloSeenEvent,
@@ -33,6 +34,7 @@ type ZaloClientEvents = {
   connected: [];
   reconnecting: [attempt: number, delayMs: number];
   dead: [reason: string];
+  loggedOut: [];
 };
 
 type GroupRecentProps = {
@@ -50,6 +52,26 @@ type GroupRecentPage = {
 };
 
 export type ListenerState = 'stopped' | 'connected' | 'reconnecting' | 'dead';
+
+/** zca-js ThreadType for a bridge thread type. */
+const toThreadType = (threadType: ZaloThreadType) => (threadType === 'group' ? ThreadType.Group : ThreadType.User);
+/** Bridge thread type for a zca-js ThreadType. */
+const fromThreadType = (type: ThreadType): ZaloThreadType => (type === ThreadType.Group ? 'group' : 'user');
+
+/** Profile fields of a zca-js getUserInfo entry; the alias wins over the account's Zalo name. */
+function toProfile(raw: { displayName?: string; zaloName?: string; avatar?: string } | undefined): ZaloProfile | null {
+  return raw ? { displayName: raw.displayName || raw.zaloName, avatarUrl: raw.avatar } : null;
+}
+
+/** msgIds of a sendMessage result: the text part (caption) and each attachment. */
+function sentMsgIds(result: {
+  message?: { msgId?: unknown } | null;
+  attachment?: Array<{ msgId?: unknown }>;
+}): string[] {
+  return [result.message, ...(result.attachment ?? [])]
+    .filter((part) => part?.msgId != null)
+    .map((part) => String(part!.msgId));
+}
 
 /** Upper bound for one attachment upload/send to Zalo before the bridge gives up. */
 const MEDIA_SEND_TIMEOUT_MS = 60_000;
@@ -240,6 +262,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     // would emit every message, receipt and reaction twice (callers start listening
     // after each login, which creates a fresh listener)
     if (this.wiredListeners.has(listener)) {
+      this.listenerState = 'reconnecting'; // until first "connected", as for a fresh listener
       this.listenerManager.start(this.api);
       return;
     }
@@ -292,54 +315,43 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
         this.emit('message', normalized);
     });
     this.api.listener.on('seen_messages', (seenList) => {
-      for (const seen of seenList as Array<{
-        type: number;
-        threadId: string;
-        data: { msgId: string; seenUids?: Array<string | number> };
-      }>) {
+      for (const seen of seenList) {
         if (!seen?.data?.msgId) continue;
         this.emit('seen', {
           threadId: String(seen.threadId),
-          threadType: seen.type === 1 ? 'group' : 'user',
+          threadType: fromThreadType(seen.type),
           msgId: String(seen.data.msgId),
           // Coerce: Zalo sends numeric uids here; own-uid filtering compares strings
-          seenUids: (seen.data.seenUids ?? []).map(String),
+          seenUids: ('seenUids' in seen.data ? seen.data.seenUids : []).map(String),
         });
       }
     });
     this.api.listener.on('typing', (typing) => {
-      const typingEvent = typing as unknown as { type: number; threadId: string; data: { uid: string } };
-      if (!typingEvent?.data?.uid) return;
+      if (!typing?.data?.uid) return;
       this.emit('typing', {
-        threadId: typingEvent.threadId,
-        threadType: typingEvent.type === 1 ? 'group' : 'user',
-        uid: String(typingEvent.data.uid),
+        threadId: typing.threadId,
+        threadType: fromThreadType(typing.type),
+        uid: String(typing.data.uid),
       });
     });
     this.api.listener.on('reaction', (reaction) => {
-      const reactionEvent = reaction as unknown as {
-        threadId: string;
-        isGroup: boolean;
-        isSelf?: boolean;
-        data: { uidFrom: string; dName?: string; content: { rMsg?: Array<{ gMsgID: string }>; rIcon: string } };
-      };
-      const targetMsgId = reactionEvent?.data?.content?.rMsg?.[0]?.gMsgID;
-      if (!targetMsgId || !reactionEvent.data.uidFrom) return;
+      const targetMsgId = reaction?.data?.content?.rMsg?.[0]?.gMsgID;
+      if (!targetMsgId || !reaction.data.uidFrom) return;
       this.emit('reaction', {
-        threadId: String(reactionEvent.threadId),
-        threadType: reactionEvent.isGroup ? 'group' : 'user',
-        senderId: String(reactionEvent.data.uidFrom),
-        senderName: reactionEvent.data.dName || undefined,
-        isSelf: reactionEvent.isSelf === true,
+        threadId: String(reaction.threadId),
+        threadType: reaction.isGroup ? 'group' : 'user',
+        senderId: String(reaction.data.uidFrom),
+        senderName: reaction.data.dName || undefined,
+        isSelf: reaction.isSelf === true,
         targetMsgId: String(targetMsgId),
-        icon: reactionEvent.data.content.rIcon ?? '',
+        icon: reaction.data.content.rIcon ?? '',
       });
     });
     this.listenerManager.start(this.api);
   }
 
   /** Stops the listener (no automatic restarts) and marks the listener state as stopped. The session stays logged in. */
-  stopListening(): void {
+  private stopListening(): void {
     this.listenerManager.stop();
     this.listenerState = 'stopped';
   }
@@ -349,6 +361,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     this.stopListening();
     this.api = null;
     clearCredentials(this.opts.credsPath);
+    this.emit('loggedOut');
   }
 
   /**
@@ -356,14 +369,11 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
    * Falls back to the account's Zalo name when no display name (alias) is set.
    * Network errors are logged, never thrown.
    */
-  async getUserProfile(uid: string): Promise<{ displayName?: string; avatarUrl?: string } | null> {
+  async getUserProfile(uid: string): Promise<ZaloProfile | null> {
     if (!this.api) return null;
     try {
       const info = await this.api.getUserInfo(uid);
-      const profile = info.changed_profiles[uid] as
-        { displayName?: string; zaloName?: string; avatar?: string } | undefined;
-      if (!profile) return null;
-      return { displayName: profile.displayName || profile.zaloName, avatarUrl: profile.avatar };
+      return toProfile(info.changed_profiles[uid]);
     } catch (err) {
       console.warn(`getUserInfo(${uid}) failed:`, (err as Error).message);
       return null;
@@ -376,15 +386,13 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
    *
    * @throws when not logged in or the lookup fails (callers retry later)
    */
-  async getUserProfiles(uids: string[]): Promise<Map<string, { displayName?: string; avatarUrl?: string }>> {
+  async getUserProfiles(uids: string[]): Promise<Map<string, ZaloProfile>> {
     if (!this.api) throw new Error('Not logged in');
     const info = await this.api.getUserInfo(uids);
-    const profiles = new Map<string, { displayName?: string; avatarUrl?: string }>();
+    const profiles = new Map<string, ZaloProfile>();
     for (const uid of uids) {
-      const profile = info.changed_profiles[uid] as
-        { displayName?: string; zaloName?: string; avatar?: string } | undefined;
-      if (profile)
-        profiles.set(uid, { displayName: profile.displayName || profile.zaloName, avatarUrl: profile.avatar });
+      const profile = toProfile(info.changed_profiles[uid]);
+      if (profile) profiles.set(uid, profile);
     }
     return profiles;
   }
@@ -555,7 +563,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   ): Promise<ZaloMessage[] | null> {
     const api = this.api;
     if (!api || this.listenerState !== 'connected' || this.historyCapture) return null;
-    const type = threadType === 'group' ? ThreadType.Group : ThreadType.User;
+    const type = toThreadType(threadType);
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (this.historyCapture?.resolve === done) this.historyCapture = null;
@@ -610,7 +618,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     await api.addReaction(emojiToZalo(emoji), {
       data: { msgId, cliMsgId },
       threadId,
-      type: threadType === 'group' ? ThreadType.Group : ThreadType.User,
+      type: toThreadType(threadType),
     });
   }
 
@@ -622,7 +630,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   async recall(threadId: string, threadType: ZaloThreadType, msgId: string, cliMsgId: string): Promise<void> {
     const api = this.api;
     if (!api) throw new Error('Not logged in');
-    await api.undo({ msgId, cliMsgId }, threadId, threadType === 'group' ? ThreadType.Group : ThreadType.User);
+    await api.undo({ msgId, cliMsgId }, threadId, toThreadType(threadType));
   }
 
   /**
@@ -660,7 +668,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
           cmd: 0,
           ts: 0,
         },
-        isGroup ? ThreadType.Group : ThreadType.User,
+        toThreadType(threadType),
       );
     } catch (err) {
       console.warn('sendSeenEvent failed:', (err as Error).message);
@@ -668,11 +676,11 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   }
 
   /** Show "typing" on Zalo (Beeper owner typing → Zalo). Best-effort: no-op when logged out, errors swallowed. */
-  async sendTypingToZalo(threadId: string, threadType: ZaloThreadType): Promise<void> {
+  async sendTyping(threadId: string, threadType: ZaloThreadType): Promise<void> {
     const api = this.api;
     if (!api) return;
     try {
-      await api.sendTypingEvent(threadId, threadType === 'group' ? ThreadType.Group : ThreadType.User);
+      await api.sendTypingEvent(threadId, toThreadType(threadType));
     } catch {
       // typing is fire-and-forget
     }
@@ -705,15 +713,11 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       api.sendMessage(
         { msg: caption, attachments: [{ data, filename, metadata: { totalSize: data.byteLength, width, height } }] },
         threadId,
-        threadType === 'group' ? ThreadType.Group : ThreadType.User,
+        toThreadType(threadType),
       ),
       'image send',
     );
-    const sentMsgIds: string[] = [];
-    if (sendResult.message?.msgId != null) sentMsgIds.push(String(sendResult.message.msgId));
-    for (const attachment of sendResult.attachment ?? [])
-      if (attachment?.msgId != null) sentMsgIds.push(String(attachment.msgId));
-    return sentMsgIds;
+    return sentMsgIds(sendResult);
   }
 
   /**
@@ -738,15 +742,11 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       api.sendMessage(
         { msg: caption, attachments: [{ data, filename, metadata: { totalSize: data.byteLength } }] },
         threadId,
-        threadType === 'group' ? ThreadType.Group : ThreadType.User,
+        toThreadType(threadType),
       ),
       'file send',
     );
-    const sentMsgIds: string[] = [];
-    if (sendResult.message?.msgId != null) sentMsgIds.push(String(sendResult.message.msgId));
-    for (const attachment of sendResult.attachment ?? [])
-      if (attachment?.msgId != null) sentMsgIds.push(String(attachment.msgId));
-    return sentMsgIds;
+    return sentMsgIds(sendResult);
   }
 
   /**
@@ -769,7 +769,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   ): Promise<string[]> {
     const api = this.api;
     if (!api) throw new Error('Not logged in');
-    const zaloThreadType = threadType === 'group' ? ThreadType.Group : ThreadType.User;
+    const zaloThreadType = toThreadType(threadType);
     await this.rateLimiter.acquire();
     const [uploaded] = await withSendTimeout(
       api.uploadAttachment([{ data, filename, metadata: { totalSize: data.byteLength } }], threadId, zaloThreadType),
@@ -807,7 +807,22 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     if (!api) throw new Error('Not logged in');
     await this.rateLimiter.acquire();
     onBeforeSend?.();
-    const zaloType = threadType === 'group' ? ThreadType.Group : ThreadType.User;
+    const zaloType = toThreadType(threadType);
+    // A plain sendMessage link shows no preview on Zalo; sendLink makes Zalo build its own
+    // card. It takes no quote/mentions, so those messages stay plain text.
+    const link = !quote && !mentions?.length ? text.match(/https?:\/\/\S+/)?.[0] : undefined;
+    // Probe first: only an unparseable link falls back to plain text. A failed sendLink
+    // itself is not retried — Zalo may already have delivered it (no duplicates).
+    if (
+      link &&
+      (await api.parseLink(link).then(
+        () => true,
+        () => false,
+      ))
+    ) {
+      const sent = await api.sendLink({ msg: text, link }, threadId, zaloType);
+      return { msgId: sent?.msgId != null ? String(sent.msgId) : null };
+    }
     // A quote and/or mentions require the object form of MessageContent
     const payload =
       quote || mentions?.length

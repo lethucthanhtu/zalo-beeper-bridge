@@ -8,6 +8,7 @@ import type { Bridge } from 'matrix-appservice-bridge';
 import { MappingStore } from '../mapping-store.ts';
 import { PortalManager } from '../portal-manager.ts';
 import { PuppetRegistry } from '../puppet-registry.ts';
+import type { ZaloProfile } from '../../zalo/types.ts';
 
 const OWNER = '@owner:beeper.com';
 
@@ -236,7 +237,7 @@ describe('PortalManager', () => {
         async () => new Response(Buffer.from([0xff, 0xd8, 0xff]), { headers: { 'content-type': 'image/jpeg' } }),
       );
     const fetchProfiles = vi.fn(async (uids: string[]) => {
-      const profiles = new Map<string, { displayName?: string; avatarUrl?: string }>();
+      const profiles = new Map<string, ZaloProfile>();
       if (uids.includes('100')) profiles.set('100', { displayName: 'Carol' }); // no avatar
       if (uids.includes('900'))
         profiles.set('900', { displayName: 'Bobby', avatarUrl: 'https://s120-ava-talk.zadn.vn/b.jpg' });

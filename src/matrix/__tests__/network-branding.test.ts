@@ -7,10 +7,12 @@ const config = {
 };
 
 describe('bridgeBranding', () => {
-  it('keys bridge-info by the registration id, like mautrix bridgev2, and marks the old key legacy', () => {
-    const branding = bridgeBranding(config, { id: '862af65b-7daa', sender_localpart: 'sh-zalobot' });
-    expect(branding.stateKey).toBe('beeper.local/862af65b-7daa');
-    expect(branding.legacyStateKeys).toEqual(['beeper.local/sh-zalo']);
+  it('keys bridge-info by the registration id, like mautrix bridgev2', () => {
+    const branding = bridgeBranding(config, {
+      id: '00000000-0000-4000-8000-000000000000',
+      sender_localpart: 'sh-zalobot',
+    });
+    expect(branding.stateKey).toBe('beeper.local/00000000-0000-4000-8000-000000000000');
     expect(branding.name).toBe('Zalo');
   });
 

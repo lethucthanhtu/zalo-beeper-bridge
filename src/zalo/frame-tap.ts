@@ -46,7 +46,7 @@ const TRACE = process.env.ZALO_WS_TRACE === '1';
  *
  * @param depth how many object/array levels to expand before printing `{…}`
  */
-export function describeShape(value: unknown, depth = 3): string {
+function describeShape(value: unknown, depth = 3): string {
   if (Array.isArray(value))
     return `[${value.length}]${value.length && depth > 0 ? describeShape(value[0], depth - 1) : ''}`;
   if (value && typeof value === 'object') {

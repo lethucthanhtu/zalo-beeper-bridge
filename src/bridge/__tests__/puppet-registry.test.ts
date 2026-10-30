@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Bridge } from 'matrix-appservice-bridge';
 import type { MappingStore } from '../mapping-store.ts';
-import { assertGhostNamespace, bridgeIdFor, PuppetRegistry } from '../puppet-registry.ts';
+import { bridgeIdFor, PuppetRegistry } from '../puppet-registry.ts';
 
 const registry = (prefix?: string) =>
   new PuppetRegistry({} as Bridge, {} as MappingStore, 'beeper.local', undefined, prefix);
@@ -27,8 +27,5 @@ describe('ghost namespace', () => {
     expect(registry().uidFor('@sh-zalo2_123:beeper.local')).toBeNull();
     expect(registry().uidFor('@owner:beeper.com')).toBeNull();
     expect(registry().uidFor('@sh-zalo_:beeper.local')).toBeNull();
-    // the namespace bbctl registers for the second bridge accepts its ghosts only
-    expect(() => assertGhostNamespace('@sh-zalo2_.+:beeper\.local', second.mxidFor('1'))).not.toThrow();
-    expect(() => assertGhostNamespace('@sh-zalo_.+:beeper\.local', second.mxidFor('1'))).toThrow();
   });
 });

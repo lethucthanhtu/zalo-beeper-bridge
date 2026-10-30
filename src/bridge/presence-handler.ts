@@ -1,6 +1,7 @@
-// Zalo→Matrix ephemeral signals: read receipts and typing indicators.
-// One-way only — zca-js exposes no API to push seen/typing back to Zalo.
-// (Also hosts the owner→Zalo receipt/typing handlers and inbound reactions.)
+// Ephemeral signals: Zalo seen/typing/reactions → ghost receipts, typing and reactions in
+// Matrix, and the owner's Beeper read receipts / typing → "seen" / typing on Zalo.
+// Beeper's own privacy settings decide what is mirrored: with "send typing notifications"
+// off it sends no m.typing, with read receipts off only private ones (not m.read).
 import type { MappingStore } from './mapping-store.ts';
 import type { PuppetRegistry } from './puppet-registry.ts';
 import { zaloToEmoji } from '../zalo/reaction-map.ts';
@@ -76,17 +77,15 @@ export class PresenceHandler {
 
   /**
    * Owner typing in a portal → show typing on Zalo (m.typing EDU).
-   * Currently not wired up in index.ts (Beeper→Zalo typing disabled on the owner's request).
    *
    * @param roomId - Room the typing EDU belongs to.
    * @param userIds - Users currently typing; nothing happens unless the owner is among them.
-   * @throws Errors from `zalo.sendTypingToZalo`.
    */
   async handleOwnerTyping(roomId: string, userIds: string[]): Promise<void> {
     if (!userIds.includes(this.ownerUserId)) return;
     const portal = this.store.getPortalByRoom(roomId);
     if (!portal) return;
-    await this.zalo.sendTypingToZalo(portal.thread_id, portal.thread_type);
+    await this.zalo.sendTyping(portal.thread_id, portal.thread_type);
   }
 
   /**

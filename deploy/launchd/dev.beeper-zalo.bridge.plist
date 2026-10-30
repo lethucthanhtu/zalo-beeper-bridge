@@ -11,15 +11,15 @@
     <string>dev.beeper-zalo.bridge</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/cris/.nvm/versions/node/v24.16.0/bin/node</string>
+        <string>/Users/YOUR_USER/.nvm/versions/node/vXX/bin/node</string>
         <string>src/index.ts</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo</string>
+    <string>/Users/YOUR_USER/zalo-beeper-bridge</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/cris/.nvm/versions/node/v24.16.0/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin</string>
+        <string>/Users/YOUR_USER/.nvm/versions/node/vXX/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -28,8 +28,8 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo/logs/bridge.log</string>
+    <string>/Users/YOUR_USER/zalo-beeper-bridge/logs/bridge.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo/logs/bridge.log</string>
+    <string>/Users/YOUR_USER/zalo-beeper-bridge/logs/bridge.log</string>
 </dict>
 </plist>

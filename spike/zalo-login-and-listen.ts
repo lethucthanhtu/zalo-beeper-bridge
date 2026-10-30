@@ -51,7 +51,7 @@ async function login(): Promise<API> {
       case LoginQRCallbackEventType.QRCodeGenerated: {
         // data.code is a token, NOT the QR payload — only the PNG zca-js renders is scannable
         const qrPath = path.join(spikeDir, 'qr.png');
-        Promise.resolve(event.actions.saveToFile(qrPath)).then(() => {
+        void Promise.resolve(event.actions.saveToFile(qrPath)).then(() => {
           execFile('open', [qrPath]); // macOS Preview
           console.log(`QR opened in Preview (${qrPath}) — scan with the Zalo app. Waiting...`);
         });

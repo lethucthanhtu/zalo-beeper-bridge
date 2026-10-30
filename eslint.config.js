@@ -8,7 +8,12 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     files: ['src/**/*.ts', 'spike/**/*.ts'],
+    // Type-aware linting, for the promise rules below
+    languageOptions: { parserOptions: { projectService: true } },
     rules: {
+      // An un-awaited, un-voided promise loses its error: every fire-and-forget is explicit
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
       // House style: object shapes are `type` aliases, never `interface`
       '@typescript-eslint/consistent-type-definitions': ['error', 'type'],

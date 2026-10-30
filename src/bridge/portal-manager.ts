@@ -134,11 +134,6 @@ export class PortalManager {
     return portal.name ?? contactName ?? portal.thread_id;
   }
 
-  /** True when the Matrix room is a portal (delegates to the store). */
-  isPortalRoom(roomId: string): boolean {
-    return this.store.isPortalRoom(roomId);
-  }
-
   /**
    * Returns the thread's portal, creating it on first use. An existing portal
    * gets its owner auto-join (re)ensured; concurrent calls for a thread that is

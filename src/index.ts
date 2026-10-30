@@ -2,8 +2,7 @@
 // Top-level module (top-level await): everything below runs once at process start.
 // Startup throws (missing config / as_token / user namespace, ghost namespace mismatch)
 // are deliberate fail-fast exits.
-import fs from 'node:fs';
-import { load as loadYaml } from 'js-yaml';
+import { Logger } from 'matrix-appservice-bridge';
 import { loadConfig } from './config.ts';
 import { EchoSuppressor } from './bridge/echo-suppressor.ts';
 import { InboundHandler } from './bridge/inbound-handler.ts';
@@ -11,9 +10,9 @@ import { MappingStore } from './bridge/mapping-store.ts';
 import { OutboundHandler } from './bridge/outbound-handler.ts';
 import { PortalManager } from './bridge/portal-manager.ts';
 import { PresenceHandler } from './bridge/presence-handler.ts';
-import { assertGhostNamespace, bridgeIdFor, PuppetRegistry } from './bridge/puppet-registry.ts';
+import { bridgeIdFor, PuppetRegistry } from './bridge/puppet-registry.ts';
 import { SyncManager } from './bridge/sync-manager.ts';
-import { createBridge, startBridge } from './matrix/appservice.ts';
+import { createBridge, loadRegistration, startBridge } from './matrix/appservice.ts';
 import { AVATAR_MAX_BYTES, createZaloStatePublisher } from './matrix/beeper-bridge-state.ts';
 import { fetchMediaCapped } from './bridge/media-handler.ts';
 import { handleBotEvent, type BotCommandContext } from './matrix/bot-commands.ts';
@@ -21,6 +20,12 @@ import { bridgeBranding, ensureNetworkIdentity } from './matrix/network-branding
 import { ZaloClient } from './zalo/zalo-client.ts';
 
 const config = loadConfig();
+// matrix-appservice-bridge logs nothing until its root logger is configured
+Logger.configure({ console: config.logging.level });
+// Registration: as_token, ghost namespace, and the appservice id used to build the
+// bridge-info state_key (<domain>/<registration id> — see network-branding.ts)
+const registration = loadRegistration(config.matrix.registrationPath);
+const asToken = registration.getAppServiceToken()!;
 
 const zalo = new ZaloClient({
   credsPath: config.zalo.credsPath,
@@ -30,19 +35,13 @@ const zalo = new ZaloClient({
 
 const store = new MappingStore(config.bridge.dbPath);
 
-const botContext: BotCommandContext = {
-  // bridge is assigned right below; handleBotEvent only runs after startBridge
-  bridge: undefined as unknown as BotCommandContext['bridge'],
-  zalo,
-  ownerUserId: config.matrix.owner,
-};
-
 const echoSuppressor = new EchoSuppressor();
 
-// `outbound` and `presence` are declared further down; these handlers only run once
-// startBridge() is listening, by which time both exist.
+// `outbound`, `presence` and `botContext` are declared further down; these handlers only
+// run once startBridge() is listening, by which time all exist.
 const bridge = createBridge(
   config,
+  registration,
   /**
    * Matrix timeline/state event: portal traffic goes to the outbound (Matrix → Zalo) handler,
    * everything else to the management-bot command handler.
@@ -59,34 +58,22 @@ const bridge = createBridge(
    * Matrix ephemeral EDU: the owner's read receipts in a portal are mirrored onto Zalo as "seen".
    */
   async (event) => {
-    // Ephemeral: owner's read receipts + typing in a portal → mirror onto Zalo.
-    // Presence events carry no room_id and are ignored.
-    if (event.type === 'm.receipt') {
-      if (store.isPortalRoom(event.room_id))
-        await presence.handleOwnerReceipt(event.room_id, event.content as Record<string, unknown>);
-    }
-    // Typing mirroring disabled on request — re-enable by uncommenting:
-    // else if (event.type === "m.typing") {
-    //   if (store.isPortalRoom(event.room_id)) await presence.handleOwnerTyping(event.room_id, event.content.user_ids ?? []);
-    // }
+    // Owner receipts/typing in a portal → Zalo (Beeper's privacy settings decide whether
+    // it sends them at all); presence events carry no room_id
+    if (event.type === 'm.receipt' && store.isPortalRoom(event.room_id))
+      await presence.handleOwnerReceipt(event.room_id, event.content as Record<string, unknown>);
+    else if (event.type === 'm.typing' && store.isPortalRoom(event.room_id))
+      await presence.handleOwnerTyping(event.room_id, event.content.user_ids);
   },
 );
-botContext.bridge = bridge;
 
-// Registration holds the as_token, ghost namespace, and the appservice id used to
-// build the bridge-info state_key (<domain>/<registration id> — see network-branding.ts)
-const registration = loadYaml(fs.readFileSync(config.matrix.registrationPath, 'utf8')) as {
-  id?: string;
-  as_token?: string;
-  sender_localpart?: string;
-  namespaces?: { users?: Array<{ regex: string }> };
-};
-const asToken = registration.as_token;
-if (!asToken) throw new Error(`No as_token in ${config.matrix.registrationPath}`);
 // bridge name = sender_localpart minus the trailing "bot" (sh-zalobot → sh-zalo):
 // used for the remote-state endpoint, the double-puppet source tag and the ghost prefix
-const bridgeAppId = bridgeIdFor(registration.sender_localpart);
-const branding = bridgeBranding(config, registration);
+const bridgeAppId = bridgeIdFor(registration.getSenderLocalpart() ?? undefined);
+const branding = bridgeBranding(config, {
+  id: registration.getId(),
+  sender_localpart: registration.getSenderLocalpart(),
+});
 
 // Shared between in/out handlers: event_ids the bridge posted as the owner (own
 // phone messages) + events already sent outbound — prevents re-sending / loops.
@@ -127,13 +114,19 @@ const outbound = new OutboundHandler({
   bridgedEventIds,
 });
 const syncManager = new SyncManager({ zalo, portals, inbound, store });
-botContext.runSync = () => syncManager.run();
-botContext.listAccounts = () => store.listAccounts();
+const botContext: BotCommandContext = {
+  bridge,
+  zalo,
+  ownerUserId: config.matrix.owner,
+  runSync: () => syncManager.run(),
+  listAccounts: () => store.listAccounts(),
+};
 
 // Fail fast if computed ghost MXIDs cannot be registered under this appservice
-const usersRegex = registration.namespaces?.users?.[0]?.regex;
-if (!usersRegex) throw new Error(`No user namespace in ${config.matrix.registrationPath}`);
-assertGhostNamespace(usersRegex, puppets.mxidFor('1234567890'));
+const sampleGhost = puppets.mxidFor('1234567890');
+if (!registration.isUserMatch(sampleGhost, true)) {
+  throw new Error(`Ghost MXID ${sampleGhost} is outside the registration's user namespace — check registration.yaml`);
+}
 
 // Beeper needs a remote-account state to show the network and its chats (see beeper-bridge-state.ts)
 const publishZaloState = createZaloStatePublisher({
@@ -205,6 +198,7 @@ zalo.on('dead', (reason) => {
   console.error(`[zalo] listener DEAD: ${reason} — send 'login' in the management room`);
   void publishZaloState('BAD_CREDENTIALS');
 });
+zalo.on('loggedOut', () => void publishZaloState('LOGGED_OUT'));
 // Every Zalo message (incoming and own) → inbound handler (Zalo → Matrix)
 zalo.on('message', (message) => {
   // Ids only, never content — enough to tell "Zalo sent nothing" from "bridging failed"
@@ -219,7 +213,6 @@ zalo.on(
   'seen',
   (seenEvent) => void presence.handleSeen(seenEvent).catch((err) => console.warn('seen handling failed:', err)),
 );
-// Zalo → Matrix typing stays active; only the owner's Beeper → Zalo typing is disabled (see above)
 zalo.on(
   'typing',
   (typingEvent) => void presence.handleTyping(typingEvent).catch((err) => console.warn('typing handling failed:', err)),

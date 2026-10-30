@@ -20,13 +20,7 @@ services:
       - zalo-data:/data
     # Podman builds OCI images, which drop the Dockerfile HEALTHCHECK — declare it here
     healthcheck:
-      test:
-        [
-          'CMD',
-          'node',
-          '-e',
-          "require('net').connect(29350,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
-        ]
+      test: ['CMD', 'curl', '-fsS', '-o', '/dev/null', 'http://127.0.0.1:29350/health']
       interval: 30s
       timeout: 5s
       start_period: 30s

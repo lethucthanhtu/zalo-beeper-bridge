@@ -33,7 +33,7 @@
 // back to Zalo; msgIds are recorded, so a re-run skips what was already imported.
 import fs from 'node:fs';
 import path from 'node:path';
-import { load as loadYaml } from 'js-yaml';
+import { parseArgs } from 'node:util';
 import { Bridge } from 'matrix-appservice-bridge';
 import { loadConfig } from '../config.ts';
 import {
@@ -59,6 +59,7 @@ import { buildInboundMentions } from '../bridge/mentions.ts';
 import { SELF_BRIDGE_MARKER } from '../bridge/outbound-handler.ts';
 import { PortalManager } from '../bridge/portal-manager.ts';
 import { bridgeIdFor, PuppetRegistry } from '../bridge/puppet-registry.ts';
+import { loadRegistration } from '../matrix/appservice.ts';
 import { bridgeBranding } from '../matrix/network-branding.ts';
 
 // ---------------------------------------------------------------------------
@@ -75,70 +76,68 @@ const PREPARE_CONCURRENCY = 6;
 const PERMANENT_HOST = /(zpcloud|zfcloud|res-zalo|zalo-gif|zgif|zalo-api)\./;
 
 /**
- * Parses the command line (see the usage in the header comment). The first non-flag
- * argument is the export directory; numeric flags are taken as-is via Number().
+ * Parses the command line (see the usage in the header comment) with node:util parseArgs:
+ * the one positional argument is the export directory.
  *
  * @param argv the arguments after `node <script>`
  * @returns the parsed options, defaults filled in
- * @throws on an unknown/extra argument, a missing export dir, `--rebuild` without
- *   `--only`, or `--retire` without exactly one `--only` conversation
+ * @throws on an unknown/extra argument, a flag missing its value, a missing export dir,
+ *   `--rebuild` without `--only`, or `--retire` without exactly one `--only` conversation
  */
-function parseArgs(argv: string[]) {
-  const parsed = {
-    dir: '',
-    only: null as Set<string> | null,
-    dryRun: false,
-    probe: false,
-    rebuild: false,
-    mediaDir: null as string | null,
-    ownUid: null as string | null,
-    /** extra earlier rooms of the same thread whose live-only messages must be kept */
-    carryFrom: [] as string[],
-    /** after a verified rebuild, delete the superseded room(s) */
-    removeOld: false,
-    /** read-only: check each --only thread's portal room against the export + timeline */
-    verify: false,
-    /** verify the current portal of the (single) --only thread, then remove these rooms */
-    retire: null as string[] | null,
-    batch: 100,
-    delayMs: 1500,
-    mediaDays: 16,
+function parseCommandLine(argv: string[]) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      only: { type: 'string' },
+      'dry-run': { type: 'boolean', default: false },
+      probe: { type: 'boolean', default: false },
+      rebuild: { type: 'boolean', default: false },
+      'media-dir': { type: 'string' },
+      'own-uid': { type: 'string' },
+      'carry-from': { type: 'string' },
+      'remove-old': { type: 'boolean', default: false },
+      verify: { type: 'boolean', default: false },
+      retire: { type: 'string' },
+      batch: { type: 'string' },
+      'delay-ms': { type: 'string' },
+      'media-days': { type: 'string' },
+    },
+  });
+  /** A flag's value as a whole number ≥ min (NaN or fractions would break batching/pacing). */
+  const integerOf = (flag: 'batch' | 'delay-ms' | 'media-days', fallback: number, min: number): number => {
+    if (values[flag] === undefined) return fallback;
+    const value = Number(values[flag]);
+    if (!Number.isInteger(value) || value < min) throw new Error(`--${flag} needs a whole number ≥ ${min}`);
+    return value;
   };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    /** The value following a flag — a missing one is a usage error, not a crash. */
-    const valueOf = (flag: string): string => {
-      const value = argv[++i];
-      if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value`);
-      return value;
-    };
-    /** A flag's value as a whole number ≥ min (NaN or fractions would break batching/pacing). */
-    const integerOf = (flag: string, min: number): number => {
-      const value = Number(valueOf(flag));
-      if (!Number.isInteger(value) || value < min) throw new Error(`${flag} needs a whole number ≥ ${min}`);
-      return value;
-    };
-    if (arg === '--only') parsed.only = new Set(valueOf(arg).split(','));
-    else if (arg === '--dry-run') parsed.dryRun = true;
-    else if (arg === '--probe') parsed.probe = true;
-    else if (arg === '--rebuild') parsed.rebuild = true;
-    else if (arg === '--media-dir') parsed.mediaDir = valueOf(arg);
-    else if (arg === '--own-uid') parsed.ownUid = valueOf(arg);
-    else if (arg === '--carry-from') parsed.carryFrom = valueOf(arg).split(',');
-    else if (arg === '--remove-old') parsed.removeOld = true;
-    else if (arg === '--verify') parsed.verify = true;
-    else if (arg === '--retire') parsed.retire = valueOf(arg).split(',');
-    else if (arg === '--batch') parsed.batch = integerOf(arg, 1);
-    else if (arg === '--delay-ms') parsed.delayMs = integerOf(arg, 0);
-    else if (arg === '--media-days') parsed.mediaDays = integerOf(arg, 0);
-    else if (!parsed.dir) parsed.dir = arg;
-    else throw new Error(`unknown argument ${arg}`);
-  }
-  if (!parsed.dir) {
+  const [dir, extra] = positionals;
+  if (!dir) {
     throw new Error(
       'usage: import-zalo-export.ts <exportDir> [--only k1,k2] [--dry-run] [--rebuild] [--media-dir DIR] [--own-uid UID] [--batch N] [--delay-ms N] [--media-days N]',
     );
   }
+  if (extra !== undefined) throw new Error(`unknown argument ${extra}`);
+  const parsed = {
+    dir,
+    only: values.only ? new Set(values.only.split(',')) : null,
+    dryRun: values['dry-run'],
+    probe: values.probe,
+    rebuild: values.rebuild,
+    mediaDir: values['media-dir'] ?? null,
+    ownUid: values['own-uid'] ?? null,
+    /** extra earlier rooms of the same thread whose live-only messages must be kept */
+    carryFrom: values['carry-from']?.split(',') ?? [],
+    /** after a verified rebuild, delete the superseded room(s) */
+    removeOld: values['remove-old'],
+    /** read-only: check each --only thread's portal room against the export + timeline */
+    verify: values.verify,
+    /** verify the current portal of the (single) --only thread, then remove these rooms */
+    retire: values.retire?.split(',') ?? null,
+    batch: integerOf('batch', 100, 1),
+    delayMs: integerOf('delay-ms', 1500, 0),
+    mediaDays: integerOf('media-days', 16, 0),
+  };
   if (parsed.rebuild && !parsed.only) throw new Error('--rebuild needs an explicit --only list of conversations');
   if (parsed.retire && parsed.only?.size !== 1) throw new Error('--retire needs exactly one --only conversation');
   return parsed;
@@ -229,14 +228,14 @@ type Item = { kind: 'export'; ev: ImportEvent; ts: number } | LiveItem;
 // Startup: config, export files, name index
 // ---------------------------------------------------------------------------
 
-const cliOptions = parseArgs(process.argv.slice(2));
+const cliOptions = parseCommandLine(process.argv.slice(2));
 const config = loadConfig();
-const registration = loadYaml(fs.readFileSync(config.matrix.registrationPath, 'utf8')) as {
-  id?: string;
-  sender_localpart?: string;
-};
-const bridgeAppId = bridgeIdFor(registration.sender_localpart);
-const branding = bridgeBranding(config, registration);
+const registration = loadRegistration(config.matrix.registrationPath);
+const bridgeAppId = bridgeIdFor(registration.getSenderLocalpart() ?? undefined);
+const branding = bridgeBranding(config, {
+  id: registration.getId(),
+  sender_localpart: registration.getSenderLocalpart(),
+});
 const owner = config.matrix.owner;
 
 const exportMeta = JSON.parse(fs.readFileSync(path.join(cliOptions.dir, 'conversations.json'), 'utf8')) as ExportMeta;
@@ -474,7 +473,7 @@ if (cliOptions.dryRun) {
 const bridge = new Bridge({
   homeserverUrl: config.matrix.homeserverUrl,
   domain: config.matrix.domain,
-  registration: config.matrix.registrationPath,
+  registration,
   disableStores: true,
   controller: { onEvent: () => undefined },
 });

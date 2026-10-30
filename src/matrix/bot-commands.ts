@@ -19,9 +19,9 @@ export type BotCommandContext = {
   zalo: ZaloClient;
   ownerUserId: string;
   /** Conversation sync (pinned + top groups); returns a summary message. */
-  runSync?: () => Promise<string>;
+  runSync: () => Promise<string>;
   /** Zalo accounts the bridge has logged in to (multi-account groundwork). */
-  listAccounts?: () => AccountRow[];
+  listAccounts: () => AccountRow[];
 };
 
 /**
@@ -83,7 +83,7 @@ async function handleStatus(context: BotCommandContext, roomId: string): Promise
  * @param roomId - Management room to answer in.
  */
 async function handleAccounts(context: BotCommandContext, roomId: string): Promise<void> {
-  const accounts = context.listAccounts?.() ?? [];
+  const accounts = context.listAccounts();
   const current = context.zalo.ownId;
   /** ISO date-time without seconds, or "never". */
   const when = (ms: number | null) => (ms ? new Date(ms).toISOString().slice(0, 16).replace('T', ' ') : 'never');
@@ -150,7 +150,7 @@ export async function handleBotEvent(context: BotCommandContext, event: WeakEven
       await handleAccounts(context, event.room_id);
       return true;
     case 'sync': {
-      if (!context.runSync || !context.zalo.isLoggedIn) {
+      if (!context.zalo.isLoggedIn) {
         await context.bridge.getIntent().sendText(event.room_id, 'Sync unavailable — log in to Zalo first.');
         return true;
       }

@@ -87,6 +87,7 @@ re-login silently (`[zalo] re-logged in from saved credentials`).
 | Chats missing in Beeper although the log shows `[zalo] in …` | You were left at "invite" (old versions). Restart: startup joins you into every portal        |
 | No `[zalo] in/own …` lines at all                            | Close Zalo Web/PC tabs (one web session only), then `logout` + `login`                        |
 | Unknown protocol frames                                      | `ZALO_WS_TRACE=1 podman compose up -d` logs every frame header (cmd/size only, never content) |
+| Network visible in Beeper Desktop, but no chats              | Remote-account state missing — runbook, "Beeper Desktop shows the Zalo network but no chats"  |
 
 Each bridged Zalo message logs one line with ids only: `[zalo] in group text thread=… msg=…`.
 End-to-end-encrypted 1-1 pushes (cmd 551, dropped by zca-js) are rerouted to the DM handler.
@@ -112,4 +113,6 @@ docker run --rm -v zalo-beeper-bridge_zalo-data:/data -v "$PWD":/backup busybox 
 - Backfilled messages only go into rooms that are still empty (old messages are never
   appended below newer ones in a room that already shows messages).
 - Podman builds OCI images, which drop the Dockerfile `HEALTHCHECK`; `compose.yaml`
-  declares it again so both engines report health.
+  declares it again so both engines report health. Both probe the appservice's own
+  `GET /health` (served by matrix-appservice) with `curl`, as does the entrypoint before
+  it starts `bbctl proxy`.
