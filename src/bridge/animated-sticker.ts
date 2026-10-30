@@ -218,17 +218,21 @@ async function build(id: number): Promise<StickerImage | null> {
   return { buffer: Buffer.from(encoded), mimetype: 'image/webp', width: height, height, frames };
 }
 
-/** One build per sticker id for the process lifetime (results and nulls alike). */
+/** One build per sticker id for the process lifetime (a still sticker caches as null). */
 const animatedStickerCache = new Map<number, Promise<StickerImage | null>>();
 
 /**
  * Animated WebP for a multi-frame sticker (cached per id); null → use the still image.
- * Never rejects: any build error is turned into null (and cached as such).
+ * Never rejects: a build error yields null and is not cached, so a transient CDN
+ * failure doesn't freeze that sticker as a still image until restart.
  */
 export function animatedSticker(id: number): Promise<StickerImage | null> {
   let pending = animatedStickerCache.get(id);
   if (!pending) {
-    pending = build(id).catch(() => null);
+    pending = build(id).catch(() => {
+      animatedStickerCache.delete(id);
+      return null;
+    });
     animatedStickerCache.set(id, pending);
   }
   return pending;

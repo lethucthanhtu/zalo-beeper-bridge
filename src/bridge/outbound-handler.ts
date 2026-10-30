@@ -27,6 +27,19 @@ export function stripReplyFallback(body: string): string {
  */
 export const SELF_BRIDGE_MARKER = 'com.zalo-bridge.self';
 
+/**
+ * Adds an event_id to the shared `bridgedEventIds` set, dropping the oldest entries once it
+ * outgrows 5000 (insertion order) so a long-running bridge doesn't grow it without bound.
+ */
+export function rememberBridgedEvent(bridgedEventIds: Set<string>, eventId: string): void {
+  bridgedEventIds.add(eventId);
+  if (bridgedEventIds.size <= 5000) return;
+  for (const id of bridgedEventIds) {
+    bridgedEventIds.delete(id);
+    if (bridgedEventIds.size <= 4000) break;
+  }
+}
+
 /** File extension per MIME type for outbound attachments (zca-js routes by extension). */
 const MIME_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -134,13 +147,7 @@ export class OutboundHandler {
     // In-memory + synchronous, so it wins races the DB-backed hasEventId check can lose.
     if (event.event_id) {
       if (this.deps.bridgedEventIds.has(event.event_id)) return true;
-      this.deps.bridgedEventIds.add(event.event_id);
-      if (this.deps.bridgedEventIds.size > 5000) {
-        for (const id of this.deps.bridgedEventIds) {
-          this.deps.bridgedEventIds.delete(id);
-          if (this.deps.bridgedEventIds.size <= 4000) break;
-        }
-      }
+      rememberBridgedEvent(this.deps.bridgedEventIds, event.event_id);
     }
     if (event.event_id && this.deps.store.hasEventId(event.event_id)) return true;
 
@@ -270,7 +277,7 @@ export class OutboundHandler {
    * from the homeserver, attaches an MSC2530 caption when present, arms the echo
    * guards, sends via zca-js and records the resulting msgIds (the first one carries
    * the Matrix event_id so a redaction can recall it). Failures post a notice.
-   * @param event The Matrix media event (sender/event_id already checked by `handle`, re-checked here).
+   * @param event The Matrix media event (sender/event_id already checked by `handle`).
    * @param portal Portal the event belongs to.
    * @param msgtype Matrix msgtype of the media.
    * @param mxcUrl mxc:// URI of the (unencrypted or `file.url`) media.
@@ -283,8 +290,6 @@ export class OutboundHandler {
     mxcUrl: string,
     content: { body?: string; filename?: string; info?: { mimetype?: string }; 'org.matrix.msc3245.voice'?: unknown },
   ): Promise<void> {
-    if (event.sender !== this.deps.ownerUserId) return;
-    if (event.event_id && this.deps.store.hasEventId(event.event_id)) return;
     // Guards armed for this send — disarmed again when the send fails, so a real
     // photo / caption sent from the phone within the TTL is not swallowed as an echo
     let imageGuardArmed = false;
@@ -304,11 +309,13 @@ export class OutboundHandler {
         msgtype === 'm.audio' && content['org.matrix.msc3245.voice'] !== undefined
           ? aacVoiceFilename(mimetype, mediaBytes)
           : null;
-      // MSC2530 caption: when body differs from the filename, body is the caption.
+      // MSC2530 caption: only with a `filename` field that differs from body. Without one
+      // (e.g. Beeper iOS photos) body IS the filename, not a caption.
       // Attach it to the media message so Zalo shows one captioned message, not two.
       // Voice messages carry no caption (clients put "Voice message" in the body).
-      const caption = !voiceFilename && content.body && content.body !== content.filename ? content.body : '';
-      const filename = buildFilename(msgtype, content.filename, mimetype);
+      const caption =
+        !voiceFilename && content.filename && content.body && content.body !== content.filename ? content.body : '';
+      const filename = buildFilename(msgtype, content.filename ?? content.body, mimetype);
       // Arm the pre-send guard before the network call: the selfListen echo can
       // arrive before the send resolves and we record its msgId
       this.deps.echo.expectImage(portal.thread_id);
@@ -352,7 +359,7 @@ export class OutboundHandler {
       if (imageGuardArmed) this.deps.echo.cancelImage(portal.thread_id);
       if (captionGuard) this.deps.echo.cancel(portal.thread_id, captionGuard);
       await this.notice(
-        event.room_id!,
+        portal.room_id,
         `⚠ Failed to send ${msgtype.replace('m.', '')} to Zalo: ${(err as Error).message}`,
       );
     }

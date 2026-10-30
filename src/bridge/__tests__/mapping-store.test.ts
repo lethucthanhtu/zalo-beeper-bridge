@@ -83,7 +83,8 @@ describe('MappingStore', () => {
     expect(store.getQuoteJsonByEventId('$a2')).toBe('{"q":1}');
     expect(store.getSeenTargetByEventId('$a2')).toMatchObject({ senderId: 'u9', msgType: 'webchat' });
     expect(store.getEventByZaloMsgId('m0')).toEqual({ eventId: '$z', roomId: '!new:x' });
-    expect([...store.getRoomMessageIds('!old:x')]).toEqual(['live-only']);
+    // a message missing from the rebuild stays mapped to the old room
+    expect(store.getEventByZaloMsgId('live-only')).toEqual({ eventId: '$b', roomId: '!old:x' });
   });
   it('drops mappings of a removed room but never of a live portal', () => {
     store.insertPortal({ thread_id: 't1', thread_type: 'user', room_id: '!live:x', name: null });

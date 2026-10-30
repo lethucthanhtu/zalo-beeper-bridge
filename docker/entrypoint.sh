@@ -46,15 +46,17 @@ run() {
   node /app/src/index.ts &
   local bridge_pid=$!
 
-  # Proxy forwards immediately on connect — wait for the appservice port first
+  # Proxy forwards immediately on connect — wait for the appservice (/health) first
+  local ready=0
   for _ in $(seq 1 60); do
-    if node -e "require('net').connect(29350,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))" 2>/dev/null; then
+    if curl -fsS -o /dev/null http://127.0.0.1:29350/health 2>/dev/null; then
+      ready=1
       break
     fi
     kill -0 "$bridge_pid" 2>/dev/null || { wait "$bridge_pid"; exit $?; }
     sleep 1
   done
-  if ! node -e "require('net').connect(29350,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))" 2>/dev/null; then
+  if [ "$ready" -ne 1 ]; then
     echo "[entrypoint] appservice never opened 127.0.0.1:29350 — check matrix.port in config.yaml" >&2
     kill -TERM "$bridge_pid" 2>/dev/null || true
     exit 1

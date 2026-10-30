@@ -10,13 +10,13 @@
     <string>dev.beeper-zalo.proxy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/cris/.local/bin/bbctl</string>
+        <string>/Users/YOUR_USER/.local/bin/bbctl</string>
         <string>proxy</string>
         <string>-r</string>
         <string>registration.yaml</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo</string>
+    <string>/Users/YOUR_USER/zalo-beeper-bridge</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -24,8 +24,8 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo/logs/proxy.log</string>
+    <string>/Users/YOUR_USER/zalo-beeper-bridge/logs/proxy.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo/logs/proxy.log</string>
+    <string>/Users/YOUR_USER/zalo-beeper-bridge/logs/proxy.log</string>
 </dict>
 </plist>

@@ -1,34 +1,28 @@
 // Matrix appservice wiring: Bridge instance + event routing.
 // bbctl proxy holds the websocket to Beeper and forwards to our local HTTP port.
-import { AppService } from 'matrix-appservice';
-import { Bridge, type EphemeralEvent, type Request, type WeakEvent } from 'matrix-appservice-bridge';
+import fs from 'node:fs';
+import { load as loadYaml } from 'js-yaml';
+import {
+  AppServiceRegistration,
+  Bridge,
+  type EphemeralEvent,
+  type Request,
+  type WeakEvent,
+} from 'matrix-appservice-bridge';
 import type { BridgeConfig } from '../config.ts';
 
-// matrix-appservice only parses ephemeral EDUs from the UNSTABLE MSC2409 key
-// (`de.sorunome.msc2409.ephemeral`), but Beeper/hungryserv sends them under the
-// STABLE `ephemeral` key — so read receipts and typing were silently dropped.
-// Patch the transaction handler (before any AppService is constructed) to mirror
-// the stable key onto the unstable one the library reads.
-type TransactionBody = Record<string, unknown> & { ephemeral?: unknown; 'de.sorunome.msc2409.ephemeral'?: unknown };
-const appServicePrototype = AppService.prototype as unknown as {
-  onTransaction: (request: { body?: TransactionBody }, response: unknown) => void;
-};
-const originalOnTransaction = appServicePrototype.onTransaction;
 /**
- * Replacement for `AppService.prototype.onTransaction`, installed at module load.
- * Copies the stable `ephemeral` array onto the unstable MSC2409 key when only the stable
- * one is present, then delegates to the original handler unchanged.
+ * Reads registration.yaml (as_token, ghost namespace, appservice id, sender_localpart).
  *
- * @param request - Express request of the incoming `PUT /transactions/:txnId`; its body is mutated in place.
- * @param response - Express response, passed through untouched.
+ * @throws when the file is unreadable or has no as_token
  */
-appServicePrototype.onTransaction = function patchedOnTransaction(request, response) {
-  const body = request.body;
-  if (body && body['de.sorunome.msc2409.ephemeral'] === undefined && body.ephemeral !== undefined) {
-    body['de.sorunome.msc2409.ephemeral'] = body.ephemeral;
-  }
-  return originalOnTransaction.call(this, request, response);
-};
+export function loadRegistration(registrationPath: string): AppServiceRegistration {
+  const registration = AppServiceRegistration.fromObject(
+    loadYaml(fs.readFileSync(registrationPath, 'utf8')) as Parameters<typeof AppServiceRegistration.fromObject>[0],
+  );
+  if (!registration.getAppServiceToken()) throw new Error(`No as_token in ${registrationPath}`);
+  return registration;
+}
 
 /** Handler for regular (timeline/state) Matrix events routed from the appservice. */
 export type MatrixEventHandler = (event: WeakEvent) => Promise<void> | void;
@@ -40,13 +34,15 @@ export type MatrixEphemeralHandler = (event: EphemeralEvent) => Promise<void> | 
  * Each handler call is fire-and-forget: a thrown error is logged and never propagates back into
  * the library (which would otherwise fail the whole transaction).
  *
- * @param config - Bridge config; uses the `matrix` section (homeserver, domain, registration path).
+ * @param config - Bridge config; uses the `matrix` section (homeserver, domain).
+ * @param registration - The appservice registration ({@link loadRegistration}).
  * @param onEvent - Called for every timeline/state event of a transaction.
  * @param onEphemeral - Called for every ephemeral EDU (m.receipt, m.typing, m.presence).
  * @returns The configured but not yet listening bridge — call {@link startBridge} to serve it.
  */
 export function createBridge(
   config: BridgeConfig,
+  registration: AppServiceRegistration,
   onEvent: MatrixEventHandler,
   onEphemeral: MatrixEphemeralHandler,
 ): Bridge {
@@ -70,8 +66,8 @@ export function createBridge(
   const bridge = new Bridge({
     homeserverUrl: config.matrix.homeserverUrl,
     domain: config.matrix.domain,
-    registration: config.matrix.registrationPath,
-    // Own mapping store comes in Phase 4 (SQLite) — skip nedb stores entirely
+    registration,
+    // The bridge keeps its own SQLite mapping store — skip the library's nedb stores
     disableStores: true,
     controller: {
       /** Timeline/state event from the homeserver → `onEvent` (guarded, not awaited). */
@@ -99,6 +95,33 @@ export function createBridge(
 export async function startBridge(bridge: Bridge, config: BridgeConfig): Promise<void> {
   // Loopback only — bbctl proxy is the sole legitimate caller; keep 29350 off the LAN
   await bridge.run(config.matrix.port, undefined, '127.0.0.1');
+  // Hungryserv asks for bridgev2 provisioning capabilities on every proxy connect (bbctl
+  // proxy always forwards as PUT). No start-chat/group features: answer "none" instead of 404.
+  // Unauthenticated: loopback-only port, static answer.
+  bridge.addAppServicePath({
+    method: 'PUT',
+    path: '/_matrix/provision/v3/capabilities',
+    authenticate: false,
+    handler: (_req, res) => {
+      res.json({
+        resolve_identifier: {
+          create_dm: false,
+          lookup_phone: false,
+          lookup_email: false,
+          lookup_username: false,
+          any_phone: false,
+          contact_list: false,
+          search: false,
+        },
+        group_creation: {},
+      });
+    },
+  });
+  // Log anything else hungryserv proxies to us, so new probes are visible
+  bridge.appService.expressApp.use((req: { method: string; path: string }, _res: unknown, next: () => void) => {
+    console.warn(`[appservice] unhandled ${req.method} ${req.path}`);
+    next();
+  });
   console.log(
     `Appservice listening on localhost:${config.matrix.port} (run 'bbctl proxy -r ${config.matrix.registrationPath}' alongside)`,
   );

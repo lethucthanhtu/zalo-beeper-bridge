@@ -109,25 +109,25 @@ describe('normalizeZaloMessage', () => {
     const contentOf = (content: unknown) =>
       normalizeZaloMessage({ ...dmText, data: { ...dmText.data, msgType: 'chat.location.new', content } })?.content;
     // Live shapes (anonymized): a picked place, and "my location" (empty title)
-    const place = { title: 'Nhà Thuốc A', description: '1 Lê Lợi, Huế', href: '', thumb: '', action: '' };
+    const place = { title: 'Nhà Thuốc A', description: '1 Lê Lợi, Quận 1', href: '', thumb: '', action: '' };
     expect(
       contentOf({
         ...place,
-        params: '{"isUserLocation":0,"srcId":"x","latitude":16.457905199999999,"longitude":107.5874197}',
+        params: '{"isUserLocation":0,"srcId":"x","latitude":10.772022599999999,"longitude":106.6982839}',
       }),
     ).toEqual({
       kind: 'location',
-      latitude: 16.4579052,
-      longitude: 107.5874197,
+      latitude: 10.7720226,
+      longitude: 106.6982839,
       label: 'Nhà Thuốc A',
-      text: '📍 Nhà Thuốc A\n1 Lê Lợi, Huế\nhttps://www.google.com/maps?q=16.4579052,107.5874197',
+      text: '📍 Nhà Thuốc A\n1 Lê Lợi, Quận 1\nhttps://www.google.com/maps?q=10.7720226,106.6982839',
     });
     expect(
-      contentOf({ ...place, title: '', params: '{"isUserLocation":1,"latitude":16.45,"longitude":107.58}' }),
+      contentOf({ ...place, title: '', params: '{"isUserLocation":1,"latitude":10.77,"longitude":106.69}' }),
     ).toMatchObject({
       kind: 'location',
-      label: '1 Lê Lợi, Huế',
-      text: '📍 1 Lê Lợi, Huế\nhttps://www.google.com/maps?q=16.45,107.58',
+      label: '1 Lê Lợi, Quận 1',
+      text: '📍 1 Lê Lợi, Quận 1\nhttps://www.google.com/maps?q=10.77,106.69',
     });
     // Other key spellings
     expect(contentOf({ title: 'Landmark 81', params: '{"lat":10.795,"lng":106.722}' })).toMatchObject({
@@ -273,6 +273,62 @@ describe('normalizeZaloMessage', () => {
         imageUrl: 'https://photo-link-talk.zadn.vn/t.jpg',
       },
     });
+  });
+
+  it('shows the typed text of a link message, previewing the typed URL (not the resolved one)', () => {
+    const contentOf = (content: unknown) =>
+      normalizeZaloMessage({ ...dmText, data: { ...dmText.data, msgType: 'chat.recommended', content } })?.content;
+    // Live shape (shortened): title = typed text, href = resolved URL, mediaTitle = page title
+    expect(
+      contentOf({
+        title: 'https://maps.app.goo.gl/abc?g_st=ic',
+        description: 'Find local businesses in Google Maps.',
+        href: 'https://www.google.com/maps?geocode=x',
+        thumb: 'https://f2001-zpcloud.zdn.vn/t.jpg',
+        action: 'recommened.link',
+        params: '{"mediaTitle":"Google Maps"}',
+      }),
+    ).toEqual({
+      kind: 'text',
+      text: 'https://maps.app.goo.gl/abc?g_st=ic',
+      linkPreview: {
+        url: 'https://maps.app.goo.gl/abc?g_st=ic',
+        title: 'Google Maps',
+        description: 'Find local businesses in Google Maps.',
+        imageUrl: 'https://f2001-zpcloud.zdn.vn/t.jpg',
+      },
+    });
+    // A page without a title: Zalo echoes the URL as mediaTitle/description — no URL-as-title preview
+    expect(
+      contentOf({
+        title: 'xem https://a.vn/x',
+        description: 'https://a.vn/x',
+        href: 'https://a.vn/x',
+        params: '{"mediaTitle":"https://a.vn/x"}',
+      }),
+    ).toEqual({ kind: 'text', text: 'xem https://a.vn/x', linkPreview: { url: 'https://a.vn/x' } });
+  });
+
+  it('renders rich text (webchat action "rtf") as its plain text', () => {
+    const msg = normalizeZaloMessage({
+      ...dmText,
+      data: {
+        ...dmText.data,
+        content: {
+          title: 'Đợt 1 => @A @B 12k',
+          description: '',
+          href: '',
+          thumb: '',
+          childnumber: 0,
+          action: 'rtf',
+          params: '{"styles":[{"start":0,"len":5,"st":"b"}],"ver":0}',
+          type: '',
+        },
+        mentions: [{ uid: '2', pos: 9, len: 2 }],
+      },
+    });
+    expect(msg?.content).toEqual({ kind: 'text', text: 'Đợt 1 => @A @B 12k' });
+    expect(msg?.mentions).toEqual([{ uid: '2', pos: 9, len: 2 }]);
   });
 
   it('returns null when msgId is missing', () => {

@@ -16,7 +16,9 @@ zalo:
   burst: 30
 
 logging:
-  level: info
+  # matrix-appservice-bridge's own log level (debug | info | warn | error). info also logs
+  # every HTTP request, including the 30 s /health check; warn keeps errors and warnings.
+  level: warn
 
 bridge:
   # SQLite mapping store (portal rooms, ghosts, message dedup)

@@ -108,8 +108,8 @@ describe('SyncManager', () => {
 
   it('strips the u/g prefix from pinned conversation ids', () => {
     const groups = new Set(['777']);
-    expect(parsePinnedId('u2852257225922374180', groups)).toEqual({ threadId: '2852257225922374180', type: 'user' });
-    expect(parsePinnedId('g6703944863817960632', groups)).toEqual({ threadId: '6703944863817960632', type: 'group' });
+    expect(parsePinnedId('u1111111111111111111', groups)).toEqual({ threadId: '1111111111111111111', type: 'user' });
+    expect(parsePinnedId('g2222222222222222222', groups)).toEqual({ threadId: '2222222222222222222', type: 'group' });
     expect(parsePinnedId('777', groups)).toEqual({ threadId: '777', type: 'group' });
     expect(parsePinnedId('123', groups)).toEqual({ threadId: '123', type: 'user' });
   });

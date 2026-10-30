@@ -12,7 +12,7 @@ import {
 } from './media-content.ts';
 import { bridgeInboundPhoto, bridgeInboundSticker } from './media-handler.ts';
 import { buildInboundMentions } from './mentions.ts';
-import { SELF_BRIDGE_MARKER } from './outbound-handler.ts';
+import { rememberBridgedEvent, SELF_BRIDGE_MARKER } from './outbound-handler.ts';
 import type { MappingStore } from './mapping-store.ts';
 import { ownerIntent } from './owner-intent.ts';
 import type { PortalManager } from './portal-manager.ts';
@@ -69,6 +69,34 @@ export class InboundHandler {
   }
 
   /**
+   * Consumes the echo guard OutboundHandler armed for this message: a text guard by
+   * content, or — for any media send (photo, video, file, voice) — the thread's media
+   * marker. A leftover marker would swallow a real phone message and re-post the echo.
+   *
+   * @returns true when a guard matched (the message is our own Beeper send)
+   */
+  private consumeEchoGuard(msg: ZaloMessage): boolean {
+    if (msg.content.kind === 'text') return this.deps.echo.consume(msg.threadId, msg.content.text);
+    if (msg.content.kind === 'photo' || msg.content.kind === 'media') return this.deps.echo.consumeImage(msg.threadId);
+    return false;
+  }
+
+  /**
+   * Records the echo of our own Beeper send: it carries the cliMsgId the send response
+   * lacked (needed for recall) and a full quotable payload (needed to reply to it).
+   */
+  private recordOwnEcho(msg: ZaloMessage): void {
+    this.deps.store.recordMessage(
+      msg.msgId,
+      this.deps.store.getPortalByThread(msg.threadId)?.room_id ?? '',
+      null,
+      'outbound',
+      msg.quotable ? JSON.stringify(msg.quotable) : null,
+      msg.cliMsgId ?? null,
+    );
+  }
+
+  /**
    * Bridges one Zalo message (called in per-thread order by `handle`).
    * Own echoes only backfill quote/cliMsgId on the existing row; duplicates are
    * dropped. Otherwise ensures the portal (and, for groups, the sender ghost in
@@ -86,41 +114,15 @@ export class InboundHandler {
       // The send response won the race against this echo, so the guard armed for it was
       // never matched: consume it now, or it would swallow a real phone message (same
       // text, or any media in this thread) for the rest of its TTL
-      if (msg.content.kind === 'text') this.deps.echo.consume(msg.threadId, msg.content.text);
-      else if (msg.content.kind === 'photo' || msg.content.kind === 'media') this.deps.echo.consumeImage(msg.threadId);
-      this.deps.store.recordMessage(
-        msg.msgId,
-        this.deps.store.getPortalByThread(msg.threadId)?.room_id ?? '',
-        null,
-        'outbound',
-        msg.quotable ? JSON.stringify(msg.quotable) : null,
-        msg.cliMsgId ?? null,
-      );
+      this.consumeEchoGuard(msg);
+      this.recordOwnEcho(msg);
       return;
     }
     if (this.deps.store.hasMessage(msg.msgId)) return; // duplicate listener event
 
     // Our own send echoed back by selfListen → already visible in Beeper, don't repost
-    const isTextEcho =
-      msg.isSelf && msg.content.kind === 'text' && this.deps.echo.consume(msg.threadId, msg.content.text);
-    // Every outbound media send (photo, video, file, voice) arms one media marker, so
-    // the echo of any of them consumes it — not only photos (a leftover marker would
-    // otherwise swallow a real phone photo, and the echo itself would be re-posted)
-    const isMediaEcho =
-      msg.isSelf &&
-      (msg.content.kind === 'photo' || msg.content.kind === 'media') &&
-      this.deps.echo.consumeImage(msg.threadId);
-    if (isTextEcho || isMediaEcho) {
-      // The echo carries the cliMsgId our send response lacked (needed for recall)
-      // and a full quotable payload (needed to reply to our own Beeper-sent message)
-      this.deps.store.recordMessage(
-        msg.msgId,
-        this.deps.store.getPortalByThread(msg.threadId)?.room_id ?? '',
-        null,
-        'outbound',
-        msg.quotable ? JSON.stringify(msg.quotable) : null,
-        msg.cliMsgId ?? null,
-      );
+    if (msg.isSelf && this.consumeEchoGuard(msg)) {
+      this.recordOwnEcho(msg);
       return;
     }
 
@@ -292,7 +294,7 @@ export class InboundHandler {
     }
     // Own phone messages are posted as the owner and will round-trip back to the
     // appservice; mark the event so OutboundHandler never re-sends it to Zalo.
-    if (msg.isSelf && eventId) this.deps.bridgedEventIds.add(eventId);
+    if (msg.isSelf && eventId) rememberBridgedEvent(this.deps.bridgedEventIds, eventId);
     this.deps.store.recordMessage(
       msg.msgId,
       portal.room_id,

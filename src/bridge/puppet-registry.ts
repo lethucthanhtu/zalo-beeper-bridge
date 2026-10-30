@@ -2,6 +2,7 @@
 import type { Bridge, Intent } from 'matrix-appservice-bridge';
 import { fetchMediaCapped } from './media-handler.ts';
 import type { MappingStore } from './mapping-store.ts';
+import type { ZaloProfile } from '../zalo/types.ts';
 
 /** Default ghost localpart prefix (bridge registered as `sh-zalo`). */
 export const GHOST_PREFIX = 'sh-zalo_';
@@ -16,7 +17,10 @@ export const bridgeIdFor = (senderLocalpart?: string): string => (senderLocalpar
  * Looks up a Zalo contact's profile. Resolves null when the lookup is not possible
  * yet (e.g. Zalo not logged in) so the caller can retry later.
  */
-export type ProfileResolver = (uid: string) => Promise<{ displayName?: string; avatarUrl?: string } | null>;
+export type ProfileResolver = (uid: string) => Promise<ZaloProfile | null>;
+
+/** How long a profile lookup counts as current (contacts without avatar aren't re-asked sooner). */
+const PROFILE_RECHECK_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Maps Zalo uids to Matrix ghost users: registers ghosts on first use and keeps
@@ -94,13 +98,14 @@ export class PuppetRegistry {
     // A DM portal created from the owner's own message carries no peer name, so the
     // ghost would show up as a bare "sh-zalo_<uid>" in Beeper: look the name up once
     let name = displayName;
+    let profile: ZaloProfile | null = null;
     if (
       !name &&
       this.resolveProfile &&
       this.store.getPuppetDisplayName(zaloUid) === null &&
       !this.nameLookups.has(zaloUid)
     ) {
-      const profile = await this.resolveProfile(zaloUid).catch(() => null);
+      profile = await this.resolveProfile(zaloUid).catch(() => null);
       // null = not logged in yet / lookup failed → try again on a later call
       if (profile) this.nameLookups.add(zaloUid);
       name = profile?.displayName || undefined;
@@ -119,7 +124,8 @@ export class PuppetRegistry {
       this.store.getPuppetAvatarUrl(zaloUid) === null &&
       !this.store.isProfileFresh(zaloUid, PROFILE_RECHECK_MS)
     ) {
-      await this.syncAvatar(zaloUid, intent).catch((err: Error) =>
+      // Reuse the name lookup's profile: one Zalo request per new contact, not two
+      await this.syncAvatar(zaloUid, intent, profile).catch((err: Error) =>
         console.warn(`avatar sync(${mxid}) failed:`, err.message),
       );
     }
@@ -131,8 +137,8 @@ export class PuppetRegistry {
    * when the lookup is not possible yet (null). Only called when `resolveProfile` is set.
    * @throws On download, upload or profile-update failure.
    */
-  private async syncAvatar(zaloUid: string, intent: Intent): Promise<void> {
-    const profile = await this.resolveProfile!(zaloUid);
+  private async syncAvatar(zaloUid: string, intent: Intent, knownProfile: ZaloProfile | null): Promise<void> {
+    const profile = knownProfile ?? (await this.resolveProfile!(zaloUid));
     if (!profile) return;
     await this.applyAvatar(zaloUid, intent, profile.avatarUrl);
   }
@@ -166,7 +172,7 @@ export class PuppetRegistry {
    *   (`complete: false` → a lookup failed; the caller may retry later)
    */
   async repairMissingProfiles(
-    fetchProfiles: (uids: string[]) => Promise<Map<string, { displayName?: string; avatarUrl?: string }>>,
+    fetchProfiles: (uids: string[]) => Promise<Map<string, ZaloProfile>>,
     { batchSize = 50, pauseMs = 2_000 } = {},
   ): Promise<{ named: number; withAvatar: number; checked: number; complete: boolean }> {
     const pending = this.store.getPuppetsMissingProfile(PROFILE_RECHECK_MS);
@@ -205,22 +211,5 @@ export class PuppetRegistry {
       if (start + batchSize < pending.length) await new Promise((resolve) => setTimeout(resolve, pauseMs));
     }
     return result;
-  }
-}
-
-/** How long a profile lookup counts as current (contacts without avatar aren't re-asked sooner). */
-const PROFILE_RECHECK_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Startup guard: computed ghost MXIDs must fall inside the appservice namespace.
- * @param usersRegex The `namespaces.users` regex from registration.yaml.
- * @param sampleMxid A ghost MXID built by `mxidFor`.
- * @throws When the MXID does not match, i.e. every ghost action would be rejected.
- */
-export function assertGhostNamespace(usersRegex: string, sampleMxid: string): void {
-  if (!new RegExp(usersRegex).test(sampleMxid)) {
-    throw new Error(
-      `Ghost MXID ${sampleMxid} does not match registration namespace regex ${usersRegex} — check registration.yaml`,
-    );
   }
 }

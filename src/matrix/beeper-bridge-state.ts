@@ -9,6 +9,8 @@
 //   POST .../bridge/<id>/bridge_state         camelCase `stateEvent`, bridge-level states only
 //   POST .../bridge/<id>/bridge_remote_state  snake_case `state_event`, per-account states  ← this one
 
+import type { ZaloProfile } from '../zalo/types.ts';
+
 const BEEPER_API_BASE = 'https://api.beeper.com';
 
 /** Beeper hungryserv URLs embed the account name: https://matrix.beeper.com/_hungryserv/<username> */
@@ -33,12 +35,15 @@ export type RemoteStateReporter = (state: RemoteState) => Promise<void>;
 /** Profile lookups go through zca-js and can hang; past this we publish with a plain label. */
 const PROFILE_LOOKUP_TIMEOUT_MS = 5_000;
 /** Size cap for downloading the own Zalo avatar before re-hosting it on Matrix. */
-const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+export const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
 // Beeper expires a remote state that goes unrefreshed for a few hours even while the Zalo
 // listener stays connected the whole time (confirmed empirically: one state_event transition
 // at startup, no further transitions for 3h+, remoteState came back empty on next check).
 // Re-post the last known state periodically so a long-idle connection doesn't go stale.
-const HEARTBEAT_MS = 10 * 60 * 1000;
+// The startup publish is also lost (wiped when bbctl proxy comes up: remoteState stayed
+// empty until the first heartbeat on 2026-10-30), and with no remote state Beeper Desktop
+// hides every chat — so repost every minute to cap that gap at ~1 min.
+const HEARTBEAT_MS = 60 * 1000;
 
 /** Dependencies of {@link createZaloStatePublisher}; injected so this module stays free of Zalo/Matrix clients. */
 export type ZaloStatePublisherDeps = {
@@ -49,7 +54,7 @@ export type ZaloStatePublisherDeps = {
   /** account label when the Zalo profile is unavailable */
   fallbackName: string;
   getOwnId: () => string | null;
-  getOwnProfile: (uid: string) => Promise<{ displayName?: string; avatarUrl?: string } | null>;
+  getOwnProfile: (uid: string) => Promise<ZaloProfile | null>;
   /** Zalo CDN links are signed and expire — Beeper needs the avatar re-hosted as mxc:// */
   uploadAvatar: (zaloAvatarUrl: string) => Promise<string | undefined>;
 };
@@ -83,8 +88,10 @@ export function createZaloStatePublisher(
   }, HEARTBEAT_MS).unref();
 
   return async (stateEvent) => {
-    const remoteId = deps.getOwnId();
-    if (!remoteId) return; // logged out — nothing to file the state under
+    // After logout / listener death the session (and own id) is gone: file the state
+    // under the last known account, or Beeper would keep showing CONNECTED
+    const remoteId = deps.getOwnId() ?? lastState?.remote_id;
+    if (!remoteId) return; // never logged in — nothing to file the state under
     const publishNumber = ++latestPublish;
 
     const profile =
@@ -124,8 +131,6 @@ async function withTimeout<T>(promise: Promise<T | null>): Promise<T | null> {
   ]);
 }
 
-export { AVATAR_MAX_BYTES };
-
 /**
  * Build a reporter for a Beeper-hosted bridge. Returns a no-op on any other homeserver,
  * so a self-hosted (non-Beeper) deployment keeps working untouched.
@@ -150,6 +155,8 @@ export function createRemoteStateReporter(
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
+        // A hung request must not pile up behind every heartbeat
+        signal: AbortSignal.timeout(10_000),
         headers: { Authorization: `Bearer ${asToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...state, timestamp: Math.floor(Date.now() / 1000) }),
       });

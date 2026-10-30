@@ -44,8 +44,9 @@ VOLUME ["/data"]
 USER node
 WORKDIR /data
 
+# /health is served by the appservice library (matrix-appservice)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "require('net').connect(29350,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"
+  CMD curl -fsS -o /dev/null http://127.0.0.1:29350/health
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["run"]

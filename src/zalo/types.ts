@@ -46,6 +46,9 @@ export type ZaloMention = {
   len: number;
 };
 
+/** A contact's display name and avatar URL (Zalo CDN), as far as Zalo returns them. */
+export type ZaloProfile = { displayName?: string; avatarUrl?: string };
+
 /** A contact reacted to a message. */
 export type ZaloReactionEvent = {
   threadId: string;

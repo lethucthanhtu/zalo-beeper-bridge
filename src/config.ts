@@ -45,9 +45,9 @@ const configSchema = z.object({
     .default({ name: 'Zalo', logoPath: 'assets/zalo-logo.png', networkId: 'zalo' }),
   logging: z
     .object({
-      level: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+      level: z.enum(['debug', 'info', 'warn', 'error']).default('warn'),
     })
-    .default({ level: 'info' }),
+    .default({ level: 'warn' }),
 });
 
 /** Parsed and defaulted bridge configuration. */

@@ -306,16 +306,6 @@ export class MappingStore {
     }>;
   }
 
-  /** Zalo msgIds bridged into a room (outbound "evt:" echo guards excluded). */
-  getRoomMessageIds(roomId: string): Set<string> {
-    const rows = this.db
-      .prepare("SELECT zalo_msg_id FROM message WHERE room_id = ? AND zalo_msg_id NOT LIKE 'evt:%'")
-      .all(roomId) as Array<{
-      zalo_msg_id: string;
-    }>;
-    return new Set(rows.map((row) => row.zalo_msg_id));
-  }
-
   /**
    * History rebuild: point a thread at a freshly backfilled room in one transaction.
    * Messages already known keep their quote/cliMsgId/sender (replies, recall and seen
@@ -456,20 +446,13 @@ export class MappingStore {
     if (result.changes === 0) {
       // Outbound send and its selfListen echo race to record the same msgId; each
       // carries a different piece (send → event_id, echo → cli_msg_id). Backfill
-      // whichever null field the loser supplies so recall/receipts have both.
-      if (eventId)
-        this.db
-          .prepare('UPDATE message SET event_id = ? WHERE zalo_msg_id = ? AND event_id IS NULL')
-          .run(eventId, zaloMsgId);
-      if (cliMsgId)
-        this.db
-          .prepare('UPDATE message SET cli_msg_id = ? WHERE zalo_msg_id = ? AND cli_msg_id IS NULL')
-          .run(cliMsgId, zaloMsgId);
-      // quote payload for our own sends only arrives with the echo (after outbound recorded it)
-      if (quoteJson)
-        this.db
-          .prepare('UPDATE message SET quote_json = ? WHERE zalo_msg_id = ? AND quote_json IS NULL')
-          .run(quoteJson, zaloMsgId);
+      // whichever null field the loser supplies so recall/receipts have both (the quote
+      // payload of our own sends only arrives with the echo). Stored values always win.
+      this.db
+        .prepare(
+          'UPDATE message SET event_id = COALESCE(event_id, ?), cli_msg_id = COALESCE(cli_msg_id, ?), quote_json = COALESCE(quote_json, ?) WHERE zalo_msg_id = ?',
+        )
+        .run(eventId, cliMsgId, quoteJson, zaloMsgId);
     }
     return result.changes === 1;
   }
