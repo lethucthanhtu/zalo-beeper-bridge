@@ -39,6 +39,8 @@ This repository is a fork of
 
 ### Fixed
 
+- Voice notes from Beeper Android (ogg/opus) arrived on Zalo as file attachments; they are
+  re-encoded to AAC with ffmpeg (now in the container image) and sent as voice messages.
 - Beeper iOS photos were sent to Zalo with the file name as a caption.
 - GIF photos from Zalo were uploaded as JPEG.
 - A sticker that failed to build once stayed a still image until restart.

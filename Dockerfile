@@ -16,7 +16,7 @@ FROM docker.io/library/node:24-bookworm-slim
 ARG BBCTL_VERSION=v0.15.0
 ARG TARGETARCH
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl tini \
+ && apt-get install -y --no-install-recommends ca-certificates curl tini ffmpeg \
  && rm -rf /var/lib/apt/lists/* \
  && arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
  && base="https://github.com/beeper/bridge-manager/releases/download/${BBCTL_VERSION}" \

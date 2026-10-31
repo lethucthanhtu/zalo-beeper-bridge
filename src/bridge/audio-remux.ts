@@ -7,6 +7,66 @@
 // Layout written (fast-start: moov before mdat):
 //   ftyp, moov(mvhd, trak(tkhd, mdia(mdhd, hdlr, minf(smhd, dinf/dref, stbl(stsd/mp4a/esds,
 //   stts, stsc, stsz, stco))))), mdat
+//
+// The other direction (Matrix voice note → Zalo) needs real re-encoding when the client did
+// not record AAC (Beeper Android records ogg/opus): transcodeToAac runs ffmpeg for that.
+import { spawn } from 'node:child_process';
+import { errorMessage } from '../error-message.ts';
+
+/** Upper bound for one voice-note transcode. */
+const TRANSCODE_TIMEOUT_MS = 30_000;
+
+/**
+ * Re-encodes audio ffmpeg can read (e.g. ogg/opus) into a raw ADTS AAC stream — the format
+ * Zalo voice messages use. Needs `ffmpeg` on PATH (installed in the container image).
+ *
+ * @returns the ADTS bytes, or null when ffmpeg is missing, fails or times out (logged)
+ */
+export function transcodeToAac(audio: Buffer): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    /** Resolves once (ffmpeg emits both `error` and `close` when it cannot start). */
+    const finish = (result: Buffer | null, problem?: string) => {
+      if (settled) return;
+      settled = true;
+      if (problem) console.warn(`[audio] voice transcode to AAC failed: ${problem}`);
+      resolve(result);
+    };
+    const ffmpeg = spawn(
+      'ffmpeg',
+      [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-i',
+        'pipe:0',
+        '-vn',
+        '-ac',
+        '1',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '64k',
+        '-f',
+        'adts',
+        'pipe:1',
+      ],
+      { timeout: TRANSCODE_TIMEOUT_MS },
+    );
+    const chunks: Buffer[] = [];
+    let stderr = '';
+    ffmpeg.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+    ffmpeg.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+    ffmpeg.on('error', (err) => finish(null, errorMessage(err)));
+    ffmpeg.on('close', (code) => {
+      const aac = Buffer.concat(chunks);
+      if (code === 0 && isAdts(aac)) finish(aac);
+      else finish(null, `ffmpeg exit ${code}: ${stderr.trim().slice(0, 200)}`);
+    });
+    ffmpeg.stdin.on('error', () => undefined); // EPIPE when ffmpeg exits before reading everything
+    ffmpeg.stdin.end(audio);
+  });
+}
 
 /** Sampling rates by ADTS sampling_frequency_index (ISO 14496-3 table 1.18). */
 const SAMPLE_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
