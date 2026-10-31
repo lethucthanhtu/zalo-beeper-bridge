@@ -538,10 +538,12 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   }
 
   /**
-   * One page of recent messages across ALL threads of a type (what Zalo Web loads to
-   * build its conversation list — the only way to discover DM threads). Pass the
-   * oldest msgId of the previous page to go further back. null = no answer (timeout,
-   * not listening); [] = no more history.
+   * One page of messages across ALL threads of a type (what Zalo Web loads to build its
+   * conversation list — the only way to discover DM threads). The feed runs FORWARD:
+   * Zalo returns up to 50 messages after `afterMsgId`, oldest first, and with no cursor
+   * starts at the beginning of its ~1-week window (measured live 2026-10-31). Pass the
+   * newest msgId of the previous page to continue. null = no answer (timeout, not
+   * listening); [] = nothing newer.
    *
    * The reply arrives asynchronously as an `old_messages` listener event, so the
    * request parks a one-shot `historyCapture` that the handler resolves. Only one
@@ -549,12 +551,12 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
    * type arriving within 60 s is treated as the late reply and discarded.
    *
    * @param threadType which feed to page through (DMs or groups)
-   * @param beforeMsgId cursor: oldest msgId of the previous page, or null for the newest page
+   * @param afterMsgId cursor: newest msgId already seen, or null for the start of the window
    * @param timeoutMs how long to wait for the websocket reply
    */
   async fetchRecentMessagesPage(
     threadType: ZaloThreadType,
-    beforeMsgId: string | null,
+    afterMsgId: string | null,
     timeoutMs = 15_000,
   ): Promise<ZaloMessage[] | null> {
     const api = this.api;
@@ -573,7 +575,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       };
       this.historyCapture = { type, resolve: done };
       try {
-        api.listener.requestOldMessages(type, beforeMsgId);
+        api.listener.requestOldMessages(type, afterMsgId);
       } catch (err) {
         console.warn('requestOldMessages failed:', errorMessage(err));
         this.historyCapture = null;

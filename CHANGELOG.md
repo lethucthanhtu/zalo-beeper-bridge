@@ -15,9 +15,10 @@ This repository is a fork of
 - "Delete for me" on another device (`chat.delete`) removes the message in Beeper too. The
   bridge redacts it as the room's creator, never as you, so it is never turned into a recall
   for everyone on Zalo.
-- After every reconnect the bridge pages Zalo's recent feed back until it reaches a message it
-  already bridged (up to ~500 per DMs and groups), so messages that arrived while the PC slept
-  or the container was down are no longer lost.
+- After every reconnect (container start, PC wake, network drop) the bridge fetches everything
+  newer than the last message it bridged (up to ~500 per DMs and groups), so messages and calls
+  that arrived while it was away are no longer lost. The old catch-up asked Zalo for a feed
+  that runs forward from about a week ago, so it never reached recent messages.
 - Rich-text messages (bold, colours, or many @mentions) bridge as text instead of "not
   supported".
 - Links sent from Beeper show Zalo's own preview card on Zalo.

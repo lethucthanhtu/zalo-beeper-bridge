@@ -21,6 +21,7 @@ const makeMessage = (msgId: string, threadId: string, threadType: ZaloThreadType
  * @param existingPortals - Thread ids whose portal exists and already has messages.
  * @param emptyPortals - Thread ids whose portal exists but is still empty.
  * @param bridged - msgIds already in the store.
+ * @param newest - Newest bridged msgId per thread type (the catch-up start cursor).
  * @returns The manager plus recorders: requested pages, handled (replayed) messages, created portals.
  */
 function setup(
@@ -28,6 +29,7 @@ function setup(
   existingPortals: string[] = [],
   emptyPortals: string[] = [],
   bridged: string[] = [],
+  newest: Partial<Record<ZaloThreadType, string>> = {},
 ) {
   const requested: Array<[ZaloThreadType, string | null]> = [];
   const handled: ZaloMessage[] = [];
@@ -54,7 +56,7 @@ function setup(
         existingPortals.includes(threadId) || emptyPortals.includes(threadId) ? { room_id: `!${threadId}` } : undefined,
       roomHasMessages: (roomId: string) => existingPortals.includes(roomId.slice(1)),
       hasMessage: (msgId: string) => bridged.includes(msgId),
-      hasAnyMessage: () => bridged.length > 0,
+      newestMsgId: (threadType: ZaloThreadType) => newest[threadType] ?? null,
     },
   } as unknown as SyncManagerDeps;
   return { sync: new SyncManager(deps), requested, handled, created };
@@ -70,12 +72,13 @@ async function runSync(sync: SyncManager): Promise<string> {
 describe('SyncManager', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('pages DM history backwards and replays new conversations oldest-first', async () => {
+  it('pages the feed forward and replays new conversations oldest-first', async () => {
     vi.useFakeTimers();
+    // Zalo's feed runs forward: each page holds the messages after the cursor, oldest first
     const { sync, requested, handled, created } = setup({
       user: [
-        [makeMessage('300', 'dmA', 'user', 300), makeMessage('200', 'dmB', 'user', 200)],
-        [makeMessage('100', 'dmA', 'user', 100)],
+        [makeMessage('100', 'dmA', 'user', 100), makeMessage('200', 'dmB', 'user', 200)],
+        [makeMessage('300', 'dmA', 'user', 300)],
         [],
       ],
       group: [[]],
@@ -84,7 +87,7 @@ describe('SyncManager', () => {
     expect(requested).toEqual([
       ['user', null],
       ['user', '200'],
-      ['user', '100'],
+      ['user', '300'],
       ['group', null],
     ]);
     expect(created).toEqual(['g1']);
@@ -132,39 +135,43 @@ describe('SyncManager', () => {
     expect(handled.map((message) => message.threadId)).toEqual(['g1', 'dmEmpty']);
   });
 
-  it('catch-up pages back until it reaches a bridged message, then replays oldest-first', async () => {
+  it('catch-up starts after the newest bridged message and pages forward until nothing is newer', async () => {
     vi.useFakeTimers();
     const { sync, requested, handled } = setup(
       {
-        // newest page all missed; the second reaches '100', which is already bridged
         user: [
-          [makeMessage('400', 'dmA', 'user', 400), makeMessage('300', 'dmB', 'user', 300)],
-          [makeMessage('200', 'dmA', 'user', 200), makeMessage('100', 'dmA', 'user', 100)],
-          [makeMessage('50', 'dmA', 'user', 50)],
+          [
+            makeMessage('100', 'dmA', 'user', 100),
+            makeMessage('200', 'dmA', 'user', 200),
+            makeMessage('300', 'dmB', 'user', 300),
+          ],
+          [makeMessage('400', 'dmA', 'user', 400)],
+          [],
         ],
-        group: [[makeMessage('350', 'g1', 'group', 350)]],
+        group: [[makeMessage('350', 'g1', 'group', 350)], []],
       },
       [],
       [],
-      ['100'],
+      ['100'], // already bridged: not replayed again
+      { user: '90', group: '340' },
     );
     const pending = sync.catchUp();
     await vi.runAllTimersAsync();
     await pending;
     expect(requested).toEqual([
-      ['user', null],
+      ['user', '90'],
       ['user', '300'],
-      ['group', null],
-      ['group', '350'], // nothing bridged there yet: one more page, empty = end of the feed
+      ['user', '400'],
+      ['group', '340'],
+      ['group', '350'],
     ]);
-    // '100' is replayed too and dropped by the inbound msgId dedup
-    expect(handled.map((message) => message.msgId)).toEqual(['100', '200', '300', '350', '400']);
+    expect(handled.map((message) => message.msgId)).toEqual(['200', '300', '350', '400']);
   });
 
-  it('catch-up on a fresh install takes one page only', async () => {
+  it('catch-up on a fresh install takes one page from the start of the window', async () => {
     vi.useFakeTimers();
     const { sync, requested } = setup({
-      user: [[makeMessage('300', 'dmA', 'user', 300)], [makeMessage('200', 'dmA', 'user', 200)]],
+      user: [[makeMessage('200', 'dmA', 'user', 200)], [makeMessage('300', 'dmA', 'user', 300)]],
       group: [[]],
     });
     const pending = sync.catchUp();

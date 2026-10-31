@@ -272,9 +272,19 @@ export class MappingStore {
     return row?.event_id ?? null;
   }
 
-  /** True once anything has been bridged (false on a fresh install). */
-  hasAnyMessage(): boolean {
-    return this.db.prepare('SELECT 1 FROM message LIMIT 1').get() !== undefined;
+  /**
+   * Newest bridged Zalo msgId of a thread type (msgIds grow over time), or null on a fresh
+   * install. Synthetic rows (`evt:…`) and importer shadow ids (`…_0001`) are not msgIds.
+   */
+  newestMsgId(threadType: ZaloThreadType): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT m.zalo_msg_id AS id FROM message m JOIN portal p ON p.room_id = m.room_id
+         WHERE p.thread_type = ? AND m.zalo_msg_id NOT GLOB '*[^0-9]*'
+         ORDER BY length(m.zalo_msg_id) DESC, m.zalo_msg_id DESC LIMIT 1`,
+      )
+      .get(threadType) as { id: string } | undefined;
+    return row?.id ?? null;
   }
 
   /** True when the room has any message row (either direction, including outbound "evt:" guards). */
