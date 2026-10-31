@@ -5,7 +5,7 @@
 //   2. selfListen re-delivery of what we just sent — registered with EchoSuppressor
 import { imageSize } from 'image-size';
 import type { Bridge, WeakEvent } from 'matrix-appservice-bridge';
-import { isAdts } from './audio-remux.ts';
+import { isAdts, transcodeToAac } from './audio-remux.ts';
 import type { EchoSuppressor } from './echo-suppressor.ts';
 import { downloadMatrixMedia } from './media-handler.ts';
 import { mentionsFromUserIds, parseOutboundMentions } from './mentions.ts';
@@ -304,12 +304,16 @@ export class OutboundHandler {
         this.deps.mediaMaxBytes,
       );
       const mimetype = content.info?.mimetype ?? downloadedMimetype;
-      // A Matrix voice note (MSC3245 marker) in AAC goes out as a native Zalo voice
-      // message; other codecs (e.g. ogg/opus) can't be voice on Zalo and stay files
-      const voiceFilename =
-        msgtype === 'm.audio' && content['org.matrix.msc3245.voice'] !== undefined
-          ? aacVoiceFilename(mimetype, mediaBytes)
-          : null;
+      // A Matrix voice note (MSC3245 marker) goes out as a native Zalo voice message, which
+      // must be AAC: other codecs (Beeper Android records ogg/opus) are re-encoded first, and
+      // only stay a file attachment when that fails (e.g. no ffmpeg outside the container)
+      const isVoiceNote = msgtype === 'm.audio' && content['org.matrix.msc3245.voice'] !== undefined;
+      let voiceBytes = mediaBytes;
+      let voiceFilename = isVoiceNote ? aacVoiceFilename(mimetype, mediaBytes) : null;
+      if (isVoiceNote && !voiceFilename) {
+        const aac = await transcodeToAac(mediaBytes);
+        if (aac) [voiceBytes, voiceFilename] = [aac, 'voice.aac'];
+      }
       // MSC2530 caption: only with a `filename` field that differs from body. Without one
       // (e.g. Beeper iOS photos) body IS the filename, not a caption.
       // Attach it to the media message so Zalo shows one captioned message, not two.
@@ -346,7 +350,7 @@ export class OutboundHandler {
           caption,
         );
       } else if (voiceFilename) {
-        msgIds = await this.deps.zalo.sendVoice(portal.thread_id, portal.thread_type, mediaBytes, voiceFilename);
+        msgIds = await this.deps.zalo.sendVoice(portal.thread_id, portal.thread_type, voiceBytes, voiceFilename);
       } else {
         // video (.mp4) / file / non-voice audio — zca-js routes by extension
         msgIds = await this.deps.zalo.sendFile(portal.thread_id, portal.thread_type, mediaBytes, filename, caption);

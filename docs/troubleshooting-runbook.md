@@ -18,7 +18,7 @@ If Zalo throttles or locks the account, sends fail and the log shows repeated au
 
 - Check `logs/bridge.log` for `Failed to send … to Zalo`.
 - Media over the size cap (`bridge.mediaMaxBytes`, default 10 MB) is rejected — raise the cap or send smaller.
-- Voice notes in AAC (m4a) arrive as Zalo voice messages; other codecs (e.g. ogg/opus from some clients) are not transcoded and go out as file attachments.
+- Voice notes arrive as Zalo voice messages. AAC (Beeper iOS) is sent as is; other codecs (ogg/opus from Beeper Android) are re-encoded to AAC with `ffmpeg`. If a voice note still arrives as a file, the log has `[audio] voice transcode to AAC failed: …` — usually no `ffmpeg` on PATH when running outside the container.
 
 ## Images stuck "loading" in Beeper (mostly older ones)
 
