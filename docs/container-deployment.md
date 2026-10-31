@@ -64,9 +64,11 @@ DBG Appservice transaction websocket opened        <- bbctl proxy connected to B
    It is paced (1.5 s per step); ~50 groups take about 2 minutes.
 
 From then on every new Zalo message (DM or group, including ones you send from the
-phone) appears in Beeper. On every (re)connect the bridge also asks Zalo for this
-session's recent feed, so messages that arrived while the container was down are
-caught up (deduplicated by msgId).
+phone) appears in Beeper. Zalo does not re-send what arrived while the bridge was away
+(container down, PC asleep, network drop), so after every (re)connect the bridge pages
+back through this session's recent feed until it meets a message it already bridged —
+up to 10 pages (~500 messages) per DMs and groups — and replays the gap in order
+(deduplicated by msgId). The log shows `[sync] catch-up user|group: N page(s)`.
 
 The encrypted Zalo session lives on the `zalo-data` volume, so restarts and rebuilds
 re-login silently (`[zalo] re-logged in from saved credentials`).

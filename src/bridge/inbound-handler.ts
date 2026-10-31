@@ -98,6 +98,34 @@ export class InboundHandler {
   }
 
   /**
+   * Zalo "delete for me" (the account deleted messages on another device) → redacts their
+   * bridged Matrix events, so Beeper shows what the Zalo account shows. Redacted by the
+   * room's creator (the ghost for a DM, the bot for a group) and never as the owner:
+   * OutboundHandler turns an owner redaction into a Zalo recall for everyone. Messages that
+   * were never bridged are skipped; no portal is created for a deletion.
+   */
+  private async redactDeleted(msg: ZaloMessage, msgIds: string[]): Promise<void> {
+    const portal = this.deps.store.getPortalByThread(msg.threadId);
+    if (!portal) return;
+    if (msgIds.length === 0) {
+      const keys = Array.isArray(msg.quotable?.content)
+        ? Object.keys((msg.quotable.content as unknown[])[0] ?? {}).join(',')
+        : typeof msg.quotable?.content;
+      console.warn(`[bridge] chat.delete without message ids (item keys: ${keys})`);
+    }
+    const intent =
+      portal.thread_type === 'user' ? this.deps.puppets.intentFor(portal.thread_id) : this.deps.bridge.getIntent();
+    for (const zaloMsgId of msgIds) {
+      const target = this.deps.store.getEventByZaloMsgId(zaloMsgId);
+      if (!target?.eventId) continue;
+      await intent.matrixClient
+        .redactEvent(target.roomId, target.eventId, 'Deleted on Zalo')
+        .catch((err: unknown) => console.warn(`[bridge] redact ${target.eventId} failed:`, errorMessage(err)));
+    }
+    this.deps.store.recordMessage(msg.msgId, portal.room_id, null, 'inbound'); // dedup a replayed delete
+  }
+
+  /**
    * Bridges one Zalo message (called in per-thread order by `handle`).
    * Own echoes only backfill quote/cliMsgId on the existing row; duplicates are
    * dropped. Otherwise ensures the portal (and, for groups, the sender ghost in
@@ -124,6 +152,11 @@ export class InboundHandler {
     // Our own send echoed back by selfListen → already visible in Beeper, don't repost
     if (msg.isSelf && this.consumeEchoGuard(msg)) {
       this.recordOwnEcho(msg);
+      return;
+    }
+
+    if (msg.content.kind === 'delete') {
+      await this.redactDeleted(msg, msg.content.msgIds);
       return;
     }
 

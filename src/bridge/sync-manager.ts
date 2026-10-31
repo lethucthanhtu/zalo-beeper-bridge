@@ -1,6 +1,7 @@
-// On-demand conversation sync (bot command `sync`): pre-creates portals for
-// pinned conversations + every group, discovers DM threads from Zalo's recent
-// history pages, and best-effort backfills recent messages. Paced deliberately —
+// Conversation sync from Zalo's recent-history feed: the bot command `sync` (pre-creates
+// portals for pinned conversations + every group, discovers DM threads, best-effort
+// backfills recent messages) and the automatic catch-up after every listener reconnect
+// (messages missed during sleep / restart). Paced deliberately —
 // burst API traffic on the user's MAIN Zalo account is a ban-risk surface.
 import type { InboundHandler } from './inbound-handler.ts';
 import type { MappingStore } from './mapping-store.ts';
@@ -16,6 +17,9 @@ const HISTORY_COUNT = 30;
 // Recent-history pages per thread type (each page spans many threads) — how far back
 // DM threads are discovered. Zalo Web exposes no DM list other than this.
 const HISTORY_PAGES = 10;
+// Catch-up pages per thread type after a reconnect (~50 messages each): covers a night of
+// sleep on a busy account without unbounded paging
+const CATCH_UP_PAGES = 10;
 
 /** Resolves after `ms` milliseconds. */
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -86,20 +90,51 @@ export class SyncManager {
   }
 
   /**
+   * Catch-up after the Zalo listener (re)connects: Zalo does not re-push what arrived while
+   * the bridge was away (sleep, restart, network drop), and one recent-feed page holds only
+   * the newest ~50 messages per thread type. Pages back until a page reaches a message that
+   * is already bridged (the gap is closed) or CATCH_UP_PAGES, then replays everything
+   * oldest-first through the inbound pipeline (msgId dedup drops what is already bridged).
+   * A fresh install (nothing bridged yet) takes one page, as before. Skipped while a sync
+   * runs — it pages the same feed.
+   */
+  async catchUp(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
+    try {
+      const { store, inbound } = this.deps;
+      const maxPages = store.hasAnyMessage() ? CATCH_UP_PAGES : 1;
+      const reachedBridged = (page: ZaloMessage[]) => page.some((message) => store.hasMessage(message.msgId));
+      const history = new Map<string, ZaloMessage>();
+      for (const threadType of ['user', 'group'] as const) {
+        const { pages, complete } = await this.collectRecentHistory(threadType, history, maxPages, reachedBridged);
+        console.log(`[sync] catch-up ${threadType}: ${pages} page(s)${complete ? '' : ' (stopped at the page limit)'}`);
+      }
+      for (const message of [...history.values()].sort((a, b) => a.timestamp - b.timestamp)) inbound.handle(message);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  /**
    * Walks recent-history pages backwards for one thread type, collecting into `collected`
    * (keyed by msgId, so overlapping pages dedupe). Paced by PACE_MS before each page.
    *
    * @param threadType - `user` (DMs) or `group`.
    * @param collected - Output map, mutated in place.
-   * @returns Pages fetched, and whether the history end was reached (`false` when Zalo did not
-   *   answer or HISTORY_PAGES was hit first).
+   * @param maxPages - Page limit.
+   * @param isEnough - Stops after a page for which it returns true.
+   * @returns Pages fetched, and whether the walk ended on its own (history end or `isEnough`;
+   *   `false` when Zalo did not answer or `maxPages` was hit first).
    */
   private async collectRecentHistory(
     threadType: ZaloThreadType,
     collected: Map<string, ZaloMessage>,
+    maxPages = HISTORY_PAGES,
+    isEnough: (page: ZaloMessage[]) => boolean = () => false,
   ): Promise<{ pages: number; complete: boolean }> {
     let beforeMsgId: string | null = null;
-    for (let page = 0; page < HISTORY_PAGES; page++) {
+    for (let page = 0; page < maxPages; page++) {
       await sleep(PACE_MS);
       const pageMessages = await this.deps.zalo.fetchRecentMessagesPage(threadType, beforeMsgId);
       if (pageMessages === null) return { pages: page, complete: false };
@@ -109,10 +144,11 @@ export class SyncManager {
         collected.set(message.msgId, message);
         oldestMsgId = olderMsgId(oldestMsgId, message.msgId);
       }
+      if (isEnough(pageMessages)) return { pages: page + 1, complete: true };
       if (oldestMsgId === beforeMsgId) return { pages: page + 1, complete: true }; // no further progress
       beforeMsgId = oldestMsgId;
     }
-    return { pages: HISTORY_PAGES, complete: false };
+    return { pages: maxPages, complete: false };
   }
 
   /**

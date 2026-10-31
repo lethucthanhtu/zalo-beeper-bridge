@@ -30,6 +30,20 @@ type StickerContent = {
  */
 function normalizeContent(msgType: string, content: unknown): ZaloContent {
   if (msgType === 'webchat' && typeof content === 'string') return { kind: 'text', text: content };
+  // "Delete for me" from another device: content lists the deleted messages. Live shape:
+  // { type, actionType, uidFrom, uidTo, clientDelMsgId, globalDelMsgId, destId }
+  // (globalMsgId is what zca-js deleteMessage sends — kept as a fallback)
+  if (msgType === 'chat.delete') {
+    const items: unknown[] = Array.isArray(content) ? content : [];
+    const msgIds = items
+      .map((item) => {
+        const deleted = (item ?? {}) as { globalDelMsgId?: unknown; globalMsgId?: unknown };
+        return deleted.globalDelMsgId ?? deleted.globalMsgId;
+      })
+      .filter((id): id is string | number => typeof id === 'string' || typeof id === 'number')
+      .map(String);
+    return { kind: 'delete', msgIds };
+  }
   if (typeof content !== 'object' || content === null) return { kind: 'unsupported', msgType };
   const card = content as AttachmentContent;
   // Rich text (bold/colour, or text Zalo formats itself, e.g. many @mentions): the plain

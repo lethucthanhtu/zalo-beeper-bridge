@@ -8,27 +8,28 @@ It also ships a **history importer** that moves your full Zalo history (from Zal
 
 ## Features
 
-| Area                             |                       Zalo → Beeper                        |                Beeper → Zalo                |
-| -------------------------------- | :--------------------------------------------------------: | :-----------------------------------------: |
-| Text (DM + group)                |                    ✅ (incl. rich text)                    |                     ✅                      |
-| @mentions                        |                         ✅ (pills)                         |                     ✅                      |
-| Replies / quotes                 |                             ✅                             |                     ✅                      |
-| Photos                           |                             ✅                             |                     ✅                      |
-| Stickers                         |  ✅ animated (`m.sticker`, WebP built from Zalo's sprite)  |                      —                      |
-| GIFs                             |                             ✅                             |                      —                      |
-| Videos                           |                       ✅ (`m.video`)                       |                     ✅                      |
-| Files                            |                       ✅ (`m.file`)                        |                     ✅                      |
-| Voice messages                   |                 ✅ (`m.audio` voice note)                  | ✅ voice note (AAC); other codecs as a file |
-| Link cards                       |               ✅ text + Beeper link preview                |      ✅ Zalo builds its own link card       |
-| Locations                        | ✅ `m.location` (map preview, opens the device's maps app) |                      —                      |
-| Contact cards (danh thiếp)       |       ✅ QR code + name, phone and a `zalo.me` link        |                      —                      |
-| Web cards (`chat.webcontent`)    |               ✅ text (title + description)                |                      —                      |
-| Reactions                        |                             ✅                             |                     ✅                      |
-| Message recall                   |                             —                              |                     ✅                      |
-| Read receipts                    |                             ✅                             |    ✅ (follows Beeper's receipt setting)    |
-| Typing indicators                |                             ✅                             |    ✅ (follows Beeper's typing setting)     |
-| Own messages sent from the phone |                    ✅ (double-puppeted)                    |                     n/a                     |
-| End-to-end encrypted Zalo chats  |             notice only (cannot be decrypted)              |                      —                      |
+| Area                               |                       Zalo → Beeper                        |                Beeper → Zalo                |
+| ---------------------------------- | :--------------------------------------------------------: | :-----------------------------------------: |
+| Text (DM + group)                  |                    ✅ (incl. rich text)                    |                     ✅                      |
+| @mentions                          |                         ✅ (pills)                         |                     ✅                      |
+| Replies / quotes                   |                             ✅                             |                     ✅                      |
+| Photos                             |                             ✅                             |                     ✅                      |
+| Stickers                           |  ✅ animated (`m.sticker`, WebP built from Zalo's sprite)  |                      —                      |
+| GIFs                               |                             ✅                             |                      —                      |
+| Videos                             |                       ✅ (`m.video`)                       |                     ✅                      |
+| Files                              |                       ✅ (`m.file`)                        |                     ✅                      |
+| Voice messages                     |                 ✅ (`m.audio` voice note)                  | ✅ voice note (AAC); other codecs as a file |
+| Link cards                         |               ✅ text + Beeper link preview                |      ✅ Zalo builds its own link card       |
+| Locations                          | ✅ `m.location` (map preview, opens the device's maps app) |                      —                      |
+| Contact cards (danh thiếp)         |       ✅ QR code + name, phone and a `zalo.me` link        |                      —                      |
+| Web cards (`chat.webcontent`)      |               ✅ text (title + description)                |                      —                      |
+| Reactions                          |                             ✅                             |                     ✅                      |
+| Message recall                     |                             —                              |                     ✅                      |
+| Deleted "for me" on another device |                  ✅ removed in Beeper too                  |                      —                      |
+| Read receipts                      |                             ✅                             |    ✅ (follows Beeper's receipt setting)    |
+| Typing indicators                  |                             ✅                             |    ✅ (follows Beeper's typing setting)     |
+| Own messages sent from the phone   |                    ✅ (double-puppeted)                    |                     n/a                     |
+| End-to-end encrypted Zalo chats    |             notice only (cannot be decrypted)              |                      —                      |
 
 Live videos / files / voice / GIFs and link previews share their rendering with the history importer, where it was verified on real chats; for live messages they are covered by unit tests of the payload parsing. Locations and contact cards are parsed from captured live payloads; the `chat.webcontent` shape is not confirmed yet — unknown message types log their field **names** (never values) so they can be added.
 
