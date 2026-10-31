@@ -1,5 +1,8 @@
 # zalo-beeper-bridge
 
+[![CI](https://github.com/lethucthanhtu/zalo-beeper-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/lethucthanhtu/zalo-beeper-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A self-hosted [Matrix](https://matrix.org/) application service that bridges a personal **Zalo** account into **[Beeper](https://www.beeper.com/)** (or any Matrix homeserver). Built on Node.js + TypeScript, [`zca-js`](https://github.com/RFS-ADRENO/zca-js) (unofficial Zalo Web API) and [`matrix-appservice-bridge`](https://github.com/matrix-org/matrix-appservice-bridge), connected to Beeper through [`bbctl`](https://github.com/beeper/bridge-manager).
 
 It also ships a **history importer** that moves your full Zalo history (from Zalo PC and its encrypted `.zl.zip` backup) into Beeper with original timestamps, real media, replies and mentions — see [Importing Zalo history](#importing-zalo-history).
@@ -46,7 +49,7 @@ Plus: ghost users with real names + avatars, portal rooms auto-created on first 
 ## Requirements
 
 - macOS or Linux, or Windows with Docker/Podman (see [container deployment](docs/container-deployment.md))
-- Node.js 22+ (uses native TypeScript execution — no build step)
+- Node.js 22.18+ (runs TypeScript natively — no build step); the container image ships Node 24
 - A Beeper account and [`bbctl`](https://github.com/beeper/bridge-manager)
 - `ffmpeg` and Python 3 (bbctl prerequisites)
 - A Zalo account you can log in to by scanning a QR code
@@ -370,7 +373,16 @@ podman run --rm -v "$PWD:/w" -w /w docker.io/library/node:24-bookworm-slim npm i
 - `npm audit` (2026-10-28, matrix-appservice-bridge 12.0.1): 6 findings remain, all unreachable from this bridge and without an upstream fix — `ip-address` via `ip-cidr` is only used by matrix-appservice-bridge's provisioning API (not enabled here), and `deepmerge` via `html-to-text` only by matrix-bot-sdk's `sendHtmlText`/`replyHtmlText` (not called). Re-check after upgrading either package.
 - **History import:** the Zalo PC debug port listens on `127.0.0.1` only, but any local program can read your messages through it while it is open — restart Zalo PC normally when done. The backup key (`get-uin.mjs`) decrypts every backup of the account: keep it in a private file and delete it after use. Extracted backups and prepared media contain your full history and media in clear text — delete `work/` (and `/data/import-*` in the container) after importing.
 
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (setup, conventions and the
+privacy rules for fixtures and logs) and the [code of conduct](CODE_OF_CONDUCT.md). Report
+security problems privately as described in [SECURITY.md](SECURITY.md). Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
+
 ## Acknowledgements
+
+- [lequocbinh04/zalo-beeper-bridge](https://github.com/lequocbinh04/zalo-beeper-bridge) — the original project this repository is forked from
 
 - [zca-js](https://github.com/RFS-ADRENO/zca-js) — the unofficial Zalo Web API this bridge is built on
 - [matrix-appservice-bridge](https://github.com/matrix-org/matrix-appservice-bridge)

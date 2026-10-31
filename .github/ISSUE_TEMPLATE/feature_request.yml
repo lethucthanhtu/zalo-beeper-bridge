@@ -1,0 +1,24 @@
+name: Feature request
+description: A Zalo message type, a Beeper feature or anything else the bridge should do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy:** describe Zalo payloads by their field names only, never with real content or ids.
+  - type: textarea
+    id: need
+    attributes:
+      label: What do you want to do, and why?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How should it work?
+      description: Which direction, how it should look in Beeper / Zalo, how official Beeper bridges handle it if you know.
+  - type: textarea
+    id: risk
+    attributes:
+      label: Zalo account risk
+      description: Does it need extra Zalo requests (lookups, polling)? Bulk traffic can get accounts locked.
