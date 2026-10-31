@@ -272,6 +272,11 @@ export class MappingStore {
     return row?.event_id ?? null;
   }
 
+  /** True once anything has been bridged (false on a fresh install). */
+  hasAnyMessage(): boolean {
+    return this.db.prepare('SELECT 1 FROM message LIMIT 1').get() !== undefined;
+  }
+
   /** True when the room has any message row (either direction, including outbound "evt:" guards). */
   roomHasMessages(roomId: string): boolean {
     return this.db.prepare('SELECT 1 FROM message WHERE room_id = ? LIMIT 1').get(roomId) !== undefined;

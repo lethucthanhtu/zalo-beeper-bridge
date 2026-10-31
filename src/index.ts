@@ -18,6 +18,7 @@ import { fetchMediaCapped } from './bridge/media-handler.ts';
 import { handleBotEvent, type BotCommandContext } from './matrix/bot-commands.ts';
 import { bridgeBranding, ensureNetworkIdentity } from './matrix/network-branding.ts';
 import { ZaloClient } from './zalo/zalo-client.ts';
+import { errorMessage } from './error-message.ts';
 
 const config = loadConfig();
 // matrix-appservice-bridge logs nothing until its root logger is configured
@@ -199,6 +200,10 @@ zalo.on('dead', (reason) => {
   void publishZaloState('BAD_CREDENTIALS');
 });
 zalo.on('loggedOut', () => void publishZaloState('LOGGED_OUT'));
+// After every (re)connect: fetch what arrived while the bridge was away (sleep, restart)
+zalo.on('catchUp', () => {
+  syncManager.catchUp().catch((err: unknown) => console.warn('[sync] catch-up failed:', errorMessage(err)));
+});
 // Every Zalo message (incoming and own) → inbound handler (Zalo → Matrix)
 zalo.on('message', (message) => {
   // Ids only, never content — enough to tell "Zalo sent nothing" from "bridging failed"

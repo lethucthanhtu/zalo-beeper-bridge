@@ -36,6 +36,8 @@ type ZaloClientEvents = {
   reconnecting: [attempt: number, delayMs: number];
   dead: [reason: string];
   loggedOut: [];
+  /** the listener (re)connected and can page the recent feed: time to catch up missed messages */
+  catchUp: [];
 };
 
 type GroupRecentProps = {
@@ -271,19 +273,12 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     this.listenerState = 'reconnecting'; // until first "connected"
     // zca-js opens a fresh websocket per (re)connect — tap each one (E2EE DM reroute)
     listener.on('connected', () => installFrameTap(listener));
-    // Zalo does not re-push messages missed while disconnected (restart, rebuild,
-    // network drop). Once the session key arrives, ask for this session's recent
-    // DM + group feed; the old_messages handler replays it through the normal
-    // pipeline and msgId dedup drops everything already bridged.
+    // Zalo does not re-push messages missed while disconnected (sleep, restart, network
+    // drop). Once the session key arrives the feed can be paged: signal the catch-up
+    // (SyncManager.catchUp pages back until it meets an already-bridged message)
     listener.on('cipher_key', () => {
       setTimeout(() => {
-        if (this.api?.listener !== listener || this.historyCapture) return;
-        try {
-          listener.requestOldMessages(ThreadType.User, null);
-          listener.requestOldMessages(ThreadType.Group, null);
-        } catch (err) {
-          console.warn('catch-up request failed:', errorMessage(err));
-        }
+        if (this.api?.listener === listener) this.emit('catchUp');
       }, 2_000);
     });
     this.api.listener.on('message', (raw) => {

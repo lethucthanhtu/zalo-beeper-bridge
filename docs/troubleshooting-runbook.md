@@ -44,6 +44,18 @@ Expected for self-hosted bridges: Beeper's apps draw that badge for the bridge t
 
 `logging.level` in `config.yaml` is the log level of matrix-appservice-bridge (the Matrix side): `warn` (default) keeps its errors and warnings, `info` also logs every HTTP request including the 30 s `/health` check, `debug` everything. The bridge's own `[zalo]` / `[bridge]` / `[beeper]` lines are always logged.
 
+## Messages missing after the PC slept or the container was down
+
+Zalo does not re-send missed messages; the bridge fetches them itself after each reconnect.
+Look for `[zalo] listener connected` followed by `[sync] catch-up user: N page(s)` and
+`[sync] catch-up group: N page(s)` in the log.
+
+- `(stopped at the page limit)` — more than ~500 messages of that kind arrived while away; the
+  oldest of them are not bridged. Send `sync` to fill rooms that are still empty.
+- No catch-up line — the session key never arrived (the listener did not really reconnect);
+  restart the container.
+- A catch-up is skipped while a `sync` runs (both page the same feed).
+
 ## `[Zalo video / file could not be bridged: …]` notice
 
 The notice keeps the Zalo link; the log line `[media] download from <host> failed: <reason>` says why.

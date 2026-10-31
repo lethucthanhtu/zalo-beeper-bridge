@@ -14,6 +14,8 @@ export type ZaloContent =
   | { kind: 'sticker'; id: number; catId: number }
   /** video / file / voice / GIF / doodle — rendered by bridge/media-content.ts */
   | { kind: 'media'; media: MediaDescriptor }
+  /** the account deleted these messages "for me" on another device (chat.delete) */
+  | { kind: 'delete'; msgIds: string[] }
   | { kind: 'unsupported'; msgType: string };
 
 export type ZaloMessage = {
