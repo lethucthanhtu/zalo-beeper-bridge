@@ -164,4 +164,17 @@ describe('MappingStore accounts (multi-account groundwork, schema v7)', () => {
     store = new MappingStore(dbPath); // second open: v7 already, no duplicate-column error
     expect(store.listAccounts()).toEqual([]);
   });
+
+  it('finds the newest bridged msgId per thread type (the catch-up cursor)', () => {
+    expect(store.newestMsgId('user')).toBeNull(); // fresh install
+    store.insertPortal({ thread_id: 'u1', thread_type: 'user', room_id: '!dm:x', name: null });
+    store.insertPortal({ thread_id: 'g1', thread_type: 'group', room_id: '!grp:x', name: 'G' });
+    store.recordMessage('999', '!dm:x', '$a', 'inbound');
+    store.recordMessage('1000', '!dm:x', '$b', 'outbound'); // numerically newer, although "999" > "1000" as text
+    store.recordMessage('1001_0001', '!dm:x', '$c', 'inbound'); // importer shadow id, not a msgId
+    store.recordMessage('evt:$d', '!dm:x', '$d', 'outbound'); // synthetic outbound guard
+    store.recordMessage('5000', '!grp:x', '$e', 'inbound');
+    expect(store.newestMsgId('user')).toBe('1000');
+    expect(store.newestMsgId('group')).toBe('5000');
+  });
 });

@@ -47,11 +47,11 @@ Expected for self-hosted bridges: Beeper's apps draw that badge for the bridge t
 ## Messages missing after the PC slept or the container was down
 
 Zalo does not re-send missed messages; the bridge fetches them itself after each reconnect.
-Look for `[zalo] listener connected` followed by `[sync] catch-up user: N page(s)` and
-`[sync] catch-up group: N page(s)` in the log.
+Look for `[zalo] listener connected` followed by `[sync] catch-up user: N page(s)`,
+`[sync] catch-up group: N page(s)` and `[sync] catch-up: N missed message(s) to bridge`.
 
 - `(stopped at the page limit)` — more than ~500 messages of that kind arrived while away; the
-  oldest of them are not bridged. Send `sync` to fill rooms that are still empty.
+  newest of them are not fetched. Restart the container to run another catch-up from there.
 - No catch-up line — the session key never arrived (the listener did not really reconnect);
   restart the container.
 - A catch-up is skipped while a `sync` runs (both page the same feed).

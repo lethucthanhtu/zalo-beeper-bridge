@@ -17,7 +17,7 @@ const HISTORY_COUNT = 30;
 // Recent-history pages per thread type (each page spans many threads) — how far back
 // DM threads are discovered. Zalo Web exposes no DM list other than this.
 const HISTORY_PAGES = 10;
-// Catch-up pages per thread type after a reconnect (~50 messages each): covers a night of
+// Catch-up pages per thread type after a reconnect (50 messages each): covers a night of
 // sleep on a busy account without unbounded paging
 const CATCH_UP_PAGES = 10;
 
@@ -43,14 +43,14 @@ export function parsePinnedId(
 }
 
 /**
- * Returns the older of two Zalo msgIds. Zalo msgIds are numeric strings, increasing over time,
+ * Returns the newer of two Zalo msgIds. Zalo msgIds are numeric strings, increasing over time,
  * so they are compared as BigInt; a non-numeric id falls back to string comparison.
  */
-function olderMsgId(firstMsgId: string, secondMsgId: string): string {
+function newerMsgId(firstMsgId: string, secondMsgId: string): string {
   try {
-    return BigInt(firstMsgId) < BigInt(secondMsgId) ? firstMsgId : secondMsgId;
+    return BigInt(firstMsgId) > BigInt(secondMsgId) ? firstMsgId : secondMsgId;
   } catch {
-    return firstMsgId < secondMsgId ? firstMsgId : secondMsgId;
+    return firstMsgId > secondMsgId ? firstMsgId : secondMsgId;
   }
 }
 
@@ -91,62 +91,68 @@ export class SyncManager {
 
   /**
    * Catch-up after the Zalo listener (re)connects: Zalo does not re-push what arrived while
-   * the bridge was away (sleep, restart, network drop), and one recent-feed page holds only
-   * the newest ~50 messages per thread type. Pages back until a page reaches a message that
-   * is already bridged (the gap is closed) or CATCH_UP_PAGES, then replays everything
-   * oldest-first through the inbound pipeline (msgId dedup drops what is already bridged).
-   * A fresh install (nothing bridged yet) takes one page, as before. Skipped while a sync
-   * runs — it pages the same feed.
+   * the bridge was away (sleep, restart, network drop). The feed runs forward from a cursor,
+   * so it starts at the newest message already bridged (per thread type) and pages until
+   * Zalo has nothing newer, or CATCH_UP_PAGES; the missed messages are then replayed
+   * oldest-first through the inbound pipeline. A fresh install (nothing bridged yet) takes
+   * one page from the start of Zalo's window, as before. Skipped while a sync runs — it
+   * pages the same feed.
    */
   async catchUp(): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
       const { store, inbound } = this.deps;
-      const maxPages = store.hasAnyMessage() ? CATCH_UP_PAGES : 1;
-      const reachedBridged = (page: ZaloMessage[]) => page.some((message) => store.hasMessage(message.msgId));
       const history = new Map<string, ZaloMessage>();
       for (const threadType of ['user', 'group'] as const) {
-        const { pages, complete } = await this.collectRecentHistory(threadType, history, maxPages, reachedBridged);
+        const after = store.newestMsgId(threadType);
+        const { pages, complete } = await this.collectRecentHistory(
+          threadType,
+          history,
+          after ? CATCH_UP_PAGES : 1,
+          after,
+        );
         console.log(`[sync] catch-up ${threadType}: ${pages} page(s)${complete ? '' : ' (stopped at the page limit)'}`);
       }
-      for (const message of [...history.values()].sort((a, b) => a.timestamp - b.timestamp)) inbound.handle(message);
+      const missed = [...history.values()].filter((message) => !store.hasMessage(message.msgId));
+      console.log(`[sync] catch-up: ${missed.length} missed message(s) to bridge`);
+      for (const message of missed.sort((a, b) => a.timestamp - b.timestamp)) inbound.handle(message);
     } finally {
       this.running = false;
     }
   }
 
   /**
-   * Walks recent-history pages backwards for one thread type, collecting into `collected`
-   * (keyed by msgId, so overlapping pages dedupe). Paced by PACE_MS before each page.
+   * Walks the feed forward for one thread type, collecting into `collected` (keyed by msgId, so
+   * overlapping pages dedupe). Each page holds up to 50 messages after the cursor (see
+   * `ZaloClient.fetchRecentMessagesPage`). Paced by PACE_MS before each page.
    *
    * @param threadType - `user` (DMs) or `group`.
    * @param collected - Output map, mutated in place.
    * @param maxPages - Page limit.
-   * @param isEnough - Stops after a page for which it returns true.
-   * @returns Pages fetched, and whether the walk ended on its own (history end or `isEnough`;
-   *   `false` when Zalo did not answer or `maxPages` was hit first).
+   * @param afterMsgId - Start after this msgId; null = from the start of Zalo's window.
+   * @returns Pages fetched, and whether the walk ended on its own (nothing newer; `false` when
+   *   Zalo did not answer or `maxPages` was hit first).
    */
   private async collectRecentHistory(
     threadType: ZaloThreadType,
     collected: Map<string, ZaloMessage>,
     maxPages = HISTORY_PAGES,
-    isEnough: (page: ZaloMessage[]) => boolean = () => false,
+    afterMsgId: string | null = null,
   ): Promise<{ pages: number; complete: boolean }> {
-    let beforeMsgId: string | null = null;
+    let cursor = afterMsgId;
     for (let page = 0; page < maxPages; page++) {
       await sleep(PACE_MS);
-      const pageMessages = await this.deps.zalo.fetchRecentMessagesPage(threadType, beforeMsgId);
+      const pageMessages = await this.deps.zalo.fetchRecentMessagesPage(threadType, cursor);
       if (pageMessages === null) return { pages: page, complete: false };
       if (pageMessages.length === 0) return { pages: page, complete: true };
-      let oldestMsgId = pageMessages[0]!.msgId;
+      let newest = cursor ?? pageMessages[0]!.msgId;
       for (const message of pageMessages) {
         collected.set(message.msgId, message);
-        oldestMsgId = olderMsgId(oldestMsgId, message.msgId);
+        newest = newerMsgId(newest, message.msgId);
       }
-      if (isEnough(pageMessages)) return { pages: page + 1, complete: true };
-      if (oldestMsgId === beforeMsgId) return { pages: page + 1, complete: true }; // no further progress
-      beforeMsgId = oldestMsgId;
+      if (newest === cursor) return { pages: page + 1, complete: true }; // nothing newer than the cursor
+      cursor = newest;
     }
     return { pages: maxPages, complete: false };
   }
