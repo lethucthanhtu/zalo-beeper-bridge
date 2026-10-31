@@ -1,0 +1,48 @@
+name: Bug report
+description: Something does not bridge, crashes or behaves wrongly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy:** never paste message text, names, phone numbers, Zalo/Matrix ids, room ids,
+        tokens or media links. Replace them with placeholders (`<uid>`, `<room>`). Security
+        problems go to *Security → Report a vulnerability*, not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Which direction (Zalo → Beeper or Beeper → Zalo), DM or group, which message type.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines (anonymized)
+      description: '`docker logs zalo-beeper-bridge` / `podman logs zalo-beeper-bridge`. Lines such as `[bridge] unsupported Zalo msgType … (content keys: …)` are the most useful.'
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      description: '`git rev-parse --short HEAD`'
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options: [Docker, Podman, launchd (macOS), npm run dev, other]
+    validations:
+      required: true
+  - type: input
+    id: clients
+    attributes:
+      label: Beeper client(s) and version
+      placeholder: Beeper Desktop 4.x on Windows, Beeper iOS …

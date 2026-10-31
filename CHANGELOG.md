@@ -1,0 +1,88 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
+[Semantic Versioning](https://semver.org/). Dates are UTC+7.
+
+This repository is a fork of
+[lequocbinh04/zalo-beeper-bridge](https://github.com/lequocbinh04/zalo-beeper-bridge);
+1.0.0 is the upstream state the fork started from.
+
+## [Unreleased]
+
+### Added
+
+- "Delete for me" on another device (`chat.delete`) removes the message in Beeper too. The
+  bridge redacts it as the room's creator, never as you, so it is never turned into a recall
+  for everyone on Zalo.
+- After every reconnect the bridge pages Zalo's recent feed back until it reaches a message it
+  already bridged (up to ~500 per DMs and groups), so messages that arrived while the PC slept
+  or the container was down are no longer lost.
+- Rich-text messages (bold, colours, or many @mentions) bridge as text instead of "not
+  supported".
+- Links sent from Beeper show Zalo's own preview card on Zalo.
+- Typing notifications and read receipts go to Zalo exactly when Beeper sends them, so Beeper's
+  own privacy settings decide.
+- Bridge state `BAD_CREDENTIALS` when the Zalo session dies and `LOGGED_OUT` on `logout`.
+- Answers hungryserv's provisioning `capabilities` probe; logs any other proxied request.
+- `logging.level` now applies to matrix-appservice-bridge (default `warn`).
+
+### Changed
+
+- The Beeper account state is re-posted every minute (was 10). A `bbctl proxy` reconnect wiped
+  it, and Beeper Desktop then hid every Zalo chat for up to 10 minutes.
+- Zalo link cards show the text the sender typed, with the page title as the preview title.
+- Container health checks use the appservice's `/health` endpoint.
+- Stricter TypeScript (`noUnused*`, `noImplicitReturns`, `noImplicitOverride`) and type-aware
+  lint rules (no floating or misused promises, `unknown` in catch callbacks).
+
+### Fixed
+
+- Beeper iOS photos were sent to Zalo with the file name as a caption.
+- GIF photos from Zalo were uploaded as JPEG.
+- A sticker that failed to build once stayed a still image until restart.
+- `sendLink` could send a message twice after a network error.
+- Two Zalo profile lookups per new contact (now one).
+
+### Removed
+
+- Clearing of the legacy bridge-info state key, which rewrote every portal on each start.
+- A monkey-patch for ephemeral events that matrix-appservice 4.1 already handles.
+
+### Security
+
+- Removed real thread/registration ids, a captured location and a personal home path from tests
+  and launchd templates.
+
+## 2026-10-23 – 2026-10-28 (fork)
+
+### Added
+
+- Docker/Podman deployment (`compose.yaml`, entrypoint running the appservice and `bbctl proxy`
+  together).
+- History importer from Zalo PC (CDP export and encrypted `.zl.zip` backups) with one-command
+  scripts for Windows and macOS.
+- Videos, files, voice notes, GIFs, doodles, locations, contact cards and web cards from Zalo.
+- Animated stickers built from Zalo's sprite sheets.
+- Multi-account groundwork: schema v7 (`account` table, `account_id`), `accounts` command,
+  `fi.mau.receiver` in bridge info.
+- Rollback procedure for container deploys.
+
+### Changed
+
+- matrix-appservice-bridge 11.2.0 → 12.0.1; non-breaking security updates.
+- The ghost prefix is derived from the registration (several bridges per host).
+
+### Fixed
+
+- Adding the Zalo account in Beeper, voice notes, and several import-script options.
+
+## [1.0.0] - 2026-08-10 (upstream)
+
+First version by [lequocbinh04](https://github.com/lequocbinh04): two-way text, replies,
+mentions, photos, video/file/audio out, reactions, recall, read receipts, typing, double
+puppeting of your own phone messages, network branding, Beeper account state, encrypted
+credential storage, owner-only bot commands and a launchd deployment for macOS.
+
+[Unreleased]: https://github.com/lethucthanhtu/zalo-beeper-bridge/commits/main
+[1.0.0]: https://github.com/lequocbinh04/zalo-beeper-bridge

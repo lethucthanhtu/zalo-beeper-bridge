@@ -12,9 +12,30 @@
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "zalo",
+    "beeper",
+    "matrix",
+    "bridge",
+    "appservice",
+    "zca-js"
+  ],
+  "author": "Le Thuc Thanh Tu (https://github.com/lethucthanhtu)",
+  "contributors": [
+    "lequocbinh04 (https://github.com/lequocbinh04)"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lethucthanhtu/zalo-beeper-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lethucthanhtu/zalo-beeper-bridge/issues"
+  },
+  "homepage": "https://github.com/lethucthanhtu/zalo-beeper-bridge#readme",
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "type": "module",
   "dependencies": {
     "better-sqlite3": "12.11.1",
