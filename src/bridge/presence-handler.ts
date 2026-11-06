@@ -2,7 +2,10 @@
 // Matrix, and the owner's Beeper read receipts / typing → "seen" / typing on Zalo.
 // Beeper's own privacy settings decide what is mirrored: with "send typing notifications"
 // off it sends no m.typing, with read receipts off only private ones (not m.read).
+import type { Intent } from 'matrix-appservice-bridge';
+import type { EchoSuppressor } from './echo-suppressor.ts';
 import type { MappingStore } from './mapping-store.ts';
+import { rememberBridgedEvent, SELF_BRIDGE_MARKER } from './outbound-handler.ts';
 import type { PuppetRegistry } from './puppet-registry.ts';
 import { zaloToEmoji } from '../zalo/reaction-map.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
@@ -11,6 +14,16 @@ import { errorMessage } from '../error-message.ts';
 
 /** A ghost's typing indicator is cleared after this long without a new typing event. */
 const TYPING_STOP_MS = 8_000;
+
+/** What PresenceHandler needs to mirror the owner's own phone reactions as the owner. */
+export type PresenceOwnerDeps = {
+  /** Double-puppet intent of the owner (lazy: the appservice must be up first). */
+  ownerIntent: () => Intent;
+  /** Event ids the bridge posted as the owner (OutboundHandler skips them). */
+  bridgedEventIds: Set<string>;
+  /** Recognises Zalo's echo of a reaction removal made in Beeper. */
+  echo: EchoSuppressor;
+};
 
 /** Mirrors read receipts, typing indicators and reactions between Zalo and Matrix portals. */
 export class PresenceHandler {
@@ -23,6 +36,7 @@ export class PresenceHandler {
 
   private readonly zalo: ZaloClient;
   private readonly ownerUserId: string;
+  private readonly owner: PresenceOwnerDeps;
 
   /**
    * @param store - Portal and message mappings.
@@ -30,6 +44,7 @@ export class PresenceHandler {
    * @param zalo - Zalo client, used to send seen/typing to Zalo.
    * @param ownerUserId - Owner's Matrix ID (whose receipts/typing are mirrored to Zalo).
    * @param getOwnZaloId - Own Zalo uid (null while logged out).
+   * @param owner - What mirroring the owner's own phone reactions needs.
    */
   constructor(
     store: MappingStore,
@@ -37,7 +52,9 @@ export class PresenceHandler {
     zalo: ZaloClient,
     ownerUserId: string,
     getOwnZaloId: () => string | null,
+    owner: PresenceOwnerDeps,
   ) {
+    this.owner = owner;
     this.store = store;
     this.puppets = puppets;
     this.zalo = zalo;
@@ -118,27 +135,64 @@ export class PresenceHandler {
   }
 
   /**
-   * Inbound reaction (Zalo→Beeper): ghost annotates the bridged Matrix event.
-   * Removals (no icon) are skipped; a failed send is logged, not thrown.
+   * Inbound reaction (Zalo→Beeper). A contact's reaction is posted by their ghost; the
+   * owner's own reaction made on the phone is posted AS the owner (double puppet, marked
+   * so it is not sent back). Every bridged reaction is recorded so a removal (Zalo sends
+   * an empty icon, meaning "all of this user's reactions on the message") can redact it.
+   * Echoes of reactions made in Beeper are recognised by the stored row (same icon) and,
+   * for removals, by the EchoSuppressor guard. Matrix failures are logged, not thrown.
    *
    * @param event - Zalo reaction event.
    * @throws Errors from `puppets.ensurePuppet` (ghost registration/profile).
    */
   async handleReaction(event: ZaloReactionEvent): Promise<void> {
-    // Our own reaction (made from Beeper) echoes back via selfListen — it's already
-    // shown as the owner's reaction, so re-posting it as a ghost of ourselves would
-    // create a nameless "@sh-zalo_<own-uid>" reaction. Skip it.
-    if (event.isSelf || event.senderId === this.getOwnZaloId()) return;
+    const ownId = this.getOwnZaloId();
+    const isOwn = event.isSelf || (ownId !== null && event.senderId === ownId);
+    const senderId = isOwn ? ownId : event.senderId;
+    if (!senderId) return; // own reaction while our uid is unknown — can't attribute it
     const target = this.store.getEventByZaloMsgId(event.targetMsgId);
     if (!target?.eventId) return; // reacted-to message not bridged
-    if (!event.icon) return; // reaction removal — Matrix has no clean un-react via appservice; skip
-    // ensurePuppet so the reacting ghost has a name + avatar (they may not have messaged yet)
-    const intent = await this.puppets.ensurePuppet(event.senderId, event.senderName);
-    await intent
-      .sendEvent(target.roomId, 'm.reaction', {
-        'm.relates_to': { rel_type: 'm.annotation', event_id: target.eventId, key: zaloToEmoji(event.icon) },
-      })
-      .catch((err: unknown) => console.warn('inbound reaction failed:', errorMessage(err)));
+    const existing = this.store.getReactions(event.targetMsgId, senderId);
+
+    if (!event.icon) {
+      // Echo of a removal made in Beeper: the rows were already dropped there
+      if (isOwn && this.owner.echo.consumeReactionRemoval(event.threadId, event.targetMsgId)) return;
+      const intent = isOwn ? this.owner.ownerIntent() : this.puppets.intentFor(senderId);
+      for (const row of existing) {
+        this.store.deleteReaction(row.event_id); // first: the redaction echoes to OutboundHandler
+        await intent.matrixClient
+          .redactEvent(row.room_id, row.event_id, 'Reaction removed on Zalo')
+          .catch((err: unknown) => console.warn(`reaction redact ${row.event_id} failed:`, errorMessage(err)));
+      }
+      return;
+    }
+    // Already shown (echo of a Beeper reaction, or a replayed event)
+    if (existing.some((row) => row.zalo_icon === event.icon)) return;
+    const content: Record<string, unknown> = {
+      'm.relates_to': { rel_type: 'm.annotation', event_id: target.eventId, key: zaloToEmoji(event.icon) },
+    };
+    let eventId: string;
+    try {
+      if (isOwn) {
+        content[SELF_BRIDGE_MARKER] = true;
+        ({ event_id: eventId } = await this.owner.ownerIntent().sendEvent(target.roomId, 'm.reaction', content));
+        rememberBridgedEvent(this.owner.bridgedEventIds, eventId);
+      } else {
+        // ensurePuppet so the reacting ghost has a name + avatar (they may not have messaged yet)
+        const intent = await this.puppets.ensurePuppet(event.senderId, event.senderName);
+        ({ event_id: eventId } = await intent.sendEvent(target.roomId, 'm.reaction', content));
+      }
+    } catch (err) {
+      console.warn('inbound reaction failed:', errorMessage(err));
+      return;
+    }
+    this.store.recordReaction({
+      event_id: eventId,
+      room_id: target.roomId,
+      target_msg_id: event.targetMsgId,
+      sender_id: senderId,
+      zalo_icon: event.icon,
+    });
   }
 
   /**

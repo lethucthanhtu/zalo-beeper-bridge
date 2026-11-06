@@ -71,3 +71,54 @@ describe('InboundHandler — chat.delete ("delete for me" on another device)', (
     store.close();
   });
 });
+
+describe('InboundHandler — replies', () => {
+  it("maps a quote by client msgId + sender when its global msgId isn't bridged", async () => {
+    const store = new MappingStore(':memory:');
+    store.insertPortal({ thread_id: 'g1', thread_type: 'group', room_id: '!g:x', name: 'G' });
+    store.recordMessage('m1', '!g:x', '$quoted', 'inbound', null, '555', 'alice');
+    const sendMessage = vi.fn().mockResolvedValue({ event_id: '$reply' });
+    const ghostIntent = { sendMessage, join: vi.fn() };
+    const deps = {
+      bridge: { getIntent: vi.fn() },
+      store,
+      puppets: {
+        intentFor: vi.fn(() => ghostIntent),
+        ensurePuppet: vi.fn(async () => ghostIntent),
+        mxidFor: vi.fn(() => '@zalo_alice:x'),
+        ensureInRoom: vi.fn(async () => undefined),
+      },
+      portals: {
+        getOrCreatePortal: vi.fn(async () => store.getPortalByThread('g1')),
+        ensureGhostInRoom: vi.fn(async () => undefined),
+      },
+      echo: new EchoSuppressor(),
+      ownerUserId: '@owner:beeper.com',
+      mediaMaxBytes: 1,
+      resolveGroupName: async () => null,
+      resolveStickerUrl: async () => null,
+      getOwnZaloId: () => 'me',
+      bridgedEventIds: new Set<string>(),
+    };
+    const handler = new InboundHandler(deps as never);
+    const msg = normalizeZaloMessage({
+      type: 1,
+      threadId: 'g1',
+      isSelf: false,
+      data: {
+        msgId: 'm2',
+        msgType: 'webchat',
+        uidFrom: 'alice',
+        ts: '2',
+        content: 'reply to myself',
+        quote: { globalMsgId: 'unknown', cliMsgId: 555, ownerId: 'alice' },
+      },
+    }) as ZaloMessage;
+    await (handler as unknown as { process(message: ZaloMessage): Promise<void> }).process(msg);
+    expect(sendMessage).toHaveBeenCalledWith(
+      '!g:x',
+      expect.objectContaining({ 'm.relates_to': { 'm.in_reply_to': { event_id: '$quoted' } } }),
+    );
+    store.close();
+  });
+});

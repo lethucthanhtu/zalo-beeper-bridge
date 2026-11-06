@@ -175,10 +175,8 @@ export class InboundHandler {
     // Zalo quote → Matrix reply: map the quoted msgId to its bridged Matrix event.
     const extraContent: Record<string, unknown> = {};
     if (msg.isSelf) extraContent[SELF_BRIDGE_MARKER] = true;
-    if (msg.replyToMsgId) {
-      const target = this.deps.store.getEventByZaloMsgId(msg.replyToMsgId);
-      if (target?.eventId) extraContent['m.relates_to'] = { 'm.in_reply_to': { event_id: target.eventId } };
-    }
+    const replyEventId = this.resolveReply(msg, portal.room_id);
+    if (replyEventId) extraContent['m.relates_to'] = { 'm.in_reply_to': { event_id: replyEventId } };
 
     let eventId: string | null = null;
     switch (msg.content.kind) {
@@ -312,7 +310,10 @@ export class InboundHandler {
         const raw = msg.quotable?.content;
         if (msg.content.msgType !== 'e2ee') {
           const keys = raw && typeof raw === 'object' ? Object.keys(raw).join(',') : typeof raw;
-          console.warn(`[bridge] unsupported Zalo msgType ${msg.content.msgType} (content keys: ${keys})`);
+          // `action` is Zalo's card kind (an identifier like 'recommened.link'), not user content
+          const action = raw && typeof raw === 'object' ? (raw as { action?: unknown }).action : undefined;
+          const actionNote = typeof action === 'string' ? `, action: ${action.slice(0, 64)}` : '';
+          console.warn(`[bridge] unsupported Zalo msgType ${msg.content.msgType} (content keys: ${keys}${actionNote})`);
         }
         const sent = await intent.sendMessage(portal.room_id, {
           msgtype: 'm.notice',
@@ -339,6 +340,25 @@ export class InboundHandler {
       msg.senderId,
       msg.rawMsgType ?? null,
     );
+  }
+
+  /**
+   * Matrix event a Zalo quote points at: by the quoted global msgId, else by its client
+   * msgId + sender within the room. Logs the ids (never content) when the quote can't be
+   * resolved, so a missing reply can be traced.
+   */
+  private resolveReply(msg: ZaloMessage, roomId: string): string | null {
+    if (!msg.replyToMsgId && !msg.replyToCliMsgId) return null;
+    const byGlobal = msg.replyToMsgId ? this.deps.store.getEventByZaloMsgId(msg.replyToMsgId)?.eventId : null;
+    if (byGlobal) return byGlobal;
+    const byClient = msg.replyToCliMsgId
+      ? this.deps.store.getEventIdByCliMsgId(roomId, msg.replyToCliMsgId, msg.replyToSenderId ?? null)
+      : null;
+    if (byClient) return byClient;
+    console.warn(
+      `[bridge] reply target not bridged: msg=${msg.msgId} quote global=${msg.replyToMsgId ?? '-'} cli=${msg.replyToCliMsgId ?? '-'} owner=${msg.replyToSenderId ?? '-'}`,
+    );
+    return null;
   }
 
   /**

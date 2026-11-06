@@ -24,8 +24,20 @@ export type AccountRow = {
 /** Which way a message was bridged: Zalo → Matrix ('inbound') or Matrix → Zalo ('outbound'). */
 export type MessageDirection = 'inbound' | 'outbound';
 
+/** One bridged reaction: a Matrix m.reaction event ↔ a Zalo reaction on a bridged message. */
+export type ReactionRow = {
+  event_id: string;
+  room_id: string;
+  /** Zalo msgId of the message reacted to */
+  target_msg_id: string;
+  /** Zalo uid of whoever reacted (the account's own uid for the owner) */
+  sender_id: string;
+  /** Zalo icon code the reaction maps to (emoji outside Zalo's palette map to the nearest one) */
+  zalo_icon: string;
+};
+
 /** Target `PRAGMA user_version`; bump it together with a new step in `migrate()`. */
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 /**
  * Synchronous SQLite-backed store for everything the bridge must remember across
@@ -134,6 +146,21 @@ export class MappingStore {
           ALTER TABLE message ADD COLUMN account_id TEXT;
           -- bindAccount runs on every reconnect: find untagged messages without a table scan
           CREATE INDEX message_account_untagged ON message(account_id) WHERE account_id IS NULL;
+        `);
+        }
+        // Bridged reactions, so a removal on either side can be mirrored (redaction ↔ Zalo
+        // "remove reaction") and own reactions echoed back by Zalo are recognised
+        if (current < 8) {
+          this.db.exec(`
+          CREATE TABLE IF NOT EXISTS reaction (
+            event_id      TEXT PRIMARY KEY,
+            room_id       TEXT NOT NULL,
+            target_msg_id TEXT NOT NULL,
+            sender_id     TEXT NOT NULL,
+            zalo_icon     TEXT NOT NULL,
+            ts            INTEGER NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS reaction_target ON reaction(target_msg_id, sender_id);
         `);
         }
         this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -370,6 +397,7 @@ export class MappingStore {
    */
   deleteRoomMessages(roomId: string): number {
     if (this.isPortalRoom(roomId)) throw new Error(`refusing to drop messages of live portal room ${roomId}`);
+    this.db.prepare('DELETE FROM reaction WHERE room_id = ?').run(roomId);
     return this.db.prepare('DELETE FROM message WHERE room_id = ?').run(roomId).changes;
   }
 
@@ -382,6 +410,7 @@ export class MappingStore {
     if (!portal) return;
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM message WHERE room_id = ?').run(portal.room_id);
+      this.db.prepare('DELETE FROM reaction WHERE room_id = ?').run(portal.room_id);
       this.db.prepare('DELETE FROM portal WHERE thread_id = ?').run(threadId);
     })();
   }
@@ -519,6 +548,52 @@ export class MappingStore {
     const row = this.db.prepare('SELECT event_id, room_id FROM message WHERE zalo_msg_id = ?').get(zaloMsgId) as
       { event_id: string | null; room_id: string } | undefined;
     return row ? { eventId: row.event_id, roomId: row.room_id } : null;
+  }
+
+  /**
+   * Matrix event of a bridged message found by its client msgId in a room (reply mapping
+   * fallback when the quote's global msgId is unknown). Rows with no recorded sender
+   * (owner sends from Beeper) match any sender.
+   */
+  getEventIdByCliMsgId(roomId: string, cliMsgId: string, senderId: string | null): string | null {
+    const row = this.db
+      .prepare(
+        'SELECT event_id FROM message WHERE room_id = ? AND cli_msg_id = ? AND event_id IS NOT NULL AND (sender_id IS NULL OR ? IS NULL OR sender_id = ?) ORDER BY ts DESC LIMIT 1',
+      )
+      .get(roomId, cliMsgId, senderId, senderId) as { event_id: string } | undefined;
+    return row?.event_id ?? null;
+  }
+
+  /** Records a bridged reaction (either direction); a repeated event_id is ignored. */
+  recordReaction(row: ReactionRow): void {
+    this.db
+      .prepare(
+        'INSERT OR IGNORE INTO reaction (event_id, room_id, target_msg_id, sender_id, zalo_icon, ts) VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .run(row.event_id, row.room_id, row.target_msg_id, row.sender_id, row.zalo_icon, Date.now());
+  }
+
+  /** The bridged reaction behind a Matrix m.reaction event, or null. */
+  getReactionByEventId(eventId: string): ReactionRow | null {
+    return (
+      (this.db
+        .prepare('SELECT event_id, room_id, target_msg_id, sender_id, zalo_icon FROM reaction WHERE event_id = ?')
+        .get(eventId) as ReactionRow | undefined) ?? null
+    );
+  }
+
+  /** Every bridged reaction one Zalo user has on one message, oldest first. */
+  getReactions(targetMsgId: string, senderId: string): ReactionRow[] {
+    return this.db
+      .prepare(
+        'SELECT event_id, room_id, target_msg_id, sender_id, zalo_icon FROM reaction WHERE target_msg_id = ? AND sender_id = ? ORDER BY ts, rowid',
+      )
+      .all(targetMsgId, senderId) as ReactionRow[];
+  }
+
+  /** Forgets one bridged reaction. */
+  deleteReaction(eventId: string): void {
+    this.db.prepare('DELETE FROM reaction WHERE event_id = ?').run(eventId);
   }
 
   /** True when this Zalo msgId was already bridged (either direction). */
