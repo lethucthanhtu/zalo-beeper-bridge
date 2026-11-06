@@ -331,6 +331,39 @@ describe('normalizeZaloMessage', () => {
     expect(msg?.mentions).toEqual([{ uid: '2', pos: 9, len: 2 }]);
   });
 
+  it('renders a system webchat bubble with an empty href (e.g. a pin) as a notice', () => {
+    const pin = {
+      ...dmText,
+      data: {
+        ...dmText.data,
+        content: {
+          title: 'pinned a message',
+          description: '',
+          href: '',
+          thumb: '',
+          action: 'x.y',
+          params: '{}',
+          type: 0,
+        },
+      },
+    };
+    expect(normalizeZaloMessage(pin)?.content).toEqual({ kind: 'notice', text: 'pinned a message' });
+    const empty = { ...dmText, data: { ...dmText.data, content: { title: '', href: '', action: 'x.y' } } };
+    expect(normalizeZaloMessage(empty)?.content).toEqual({ kind: 'unsupported', msgType: 'webchat' });
+  });
+
+  it("keeps the quote's client msgId and owner for the reply fallback", () => {
+    const reply = {
+      ...dmText,
+      data: { ...dmText.data, quote: { globalMsgId: 0, cliMsgId: 1782964481000, ownerId: '1111111111111111111' } },
+    };
+    expect(normalizeZaloMessage(reply)).toMatchObject({
+      replyToMsgId: '0',
+      replyToCliMsgId: '1782964481000',
+      replyToSenderId: '1111111111111111111',
+    });
+  });
+
   it('returns null when msgId is missing', () => {
     const normalized = normalizeZaloMessage({ ...dmText, data: { ...dmText.data, msgId: '' } });
     expect(normalized).toBeNull();

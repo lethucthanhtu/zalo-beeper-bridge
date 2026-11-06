@@ -39,6 +39,16 @@ This repository is a fork of
 
 ### Fixed
 
+- Reactions you make on the Zalo phone app show in Beeper, and removing a reaction in either
+  app removes it in the other. Removing one reaction in Beeper keeps your other reactions on
+  that message in Zalo.
+- Replies that quote a message bridged before its server id was known (for example someone
+  replying to their own message) now show as replies in Beeper. Unresolved quotes are logged.
+- Links sent from Beeper reuse Beeper's own preview title and description on Zalo; links
+  Zalo cannot preview, or whose preview you removed in Beeper, go as plain text instead of a
+  broken card.
+- Zalo system cards such as "pinned a message" show their text in Beeper instead of
+  "[Zalo message type not supported by bridge: webchat]".
 - Voice notes from Beeper Android (ogg/opus) arrived on Zalo as file attachments; they are
   re-encoded to AAC with ffmpeg (now in the container image) and sent as voice messages.
 - Beeper iOS photos were sent to Zalo with the file name as a caption.

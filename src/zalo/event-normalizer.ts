@@ -85,6 +85,12 @@ function normalizeContent(msgType: string, content: unknown): ZaloContent {
     return { kind: 'text', text: text || '[Zalo web card — open Zalo to view]' };
   }
   if (card.href) return normalizeLinkCard({ ...card, href: card.href });
+  // System-style webchat bubbles with an empty href (e.g. "pinned a message"): Zalo puts
+  // the readable line in title/description — show it as a notice
+  if (msgType === 'webchat') {
+    const text = [card.title, card.description].filter((part) => typeof part === 'string' && part.trim()).join('\n');
+    if (text) return { kind: 'notice', text };
+  }
   return { kind: 'unsupported', msgType };
 }
 
@@ -298,6 +304,8 @@ export function normalizeZaloMessage(raw: RawZaloMessage): ZaloMessage | null {
     },
     // Zalo quote → the quoted message's global msgId (Matrix reply mapping)
     replyToMsgId: messageData.quote?.globalMsgId != null ? String(messageData.quote.globalMsgId) : undefined,
+    replyToCliMsgId: messageData.quote?.cliMsgId != null ? String(messageData.quote.cliMsgId) : undefined,
+    replyToSenderId: messageData.quote?.ownerId != null ? String(messageData.quote.ownerId) : undefined,
     mentions: messageData.mentions?.map((mention) => ({
       uid: String(mention.uid),
       pos: mention.pos,

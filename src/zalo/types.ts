@@ -38,6 +38,9 @@ export type ZaloMessage = {
   quotable?: ZaloQuotePayload;
   /** msgId of the message this one replies to (Zalo quote → Matrix reply) */
   replyToMsgId?: string;
+  /** quoted message's client id + sender — fallback when its global msgId is unknown */
+  replyToCliMsgId?: string;
+  replyToSenderId?: string;
   /** @mentions in a group message (uid + position/length in the text) */
   mentions?: ZaloMention[];
 };
@@ -108,7 +111,7 @@ export type RawZaloMessage = {
     cliMsgId?: string;
     propertyExt?: unknown;
     ttl?: number;
-    quote?: { globalMsgId?: string | number };
+    quote?: { globalMsgId?: string | number; cliMsgId?: string | number; ownerId?: string | number };
     mentions?: Array<{ uid: string; pos: number; len: number }>;
     /** present on end-to-end-encrypted 1-1 pushes (ws cmd 551): content is Signal ciphertext */
     e2ee?: unknown;

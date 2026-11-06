@@ -1,8 +1,15 @@
 // Facade over zca-js: the ONLY module allowed to import zca-js runtime classes.
 // Contains login lifecycle, listener resilience, normalization, and rate-limited sends.
 import { EventEmitter } from 'node:events';
-import { GroupMessage, Zalo, LoginQRCallbackEventType, ThreadType, type API, type TGroupMessage } from 'zca-js';
-import { emojiToZalo } from './reaction-map.ts';
+import {
+  GroupMessage,
+  Zalo,
+  LoginQRCallbackEventType,
+  ThreadType,
+  type API,
+  type Reactions,
+  type TGroupMessage,
+} from 'zca-js';
 import { loadCredentials, saveCredentials, clearCredentials } from './credential-store.ts';
 import { normalizeZaloMessage } from './event-normalizer.ts';
 import { installFrameTap } from './frame-tap.ts';
@@ -600,7 +607,8 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
 
   /**
    * React to a Zalo message (Beeper→Zalo). Not rate-limited — it's a control action, not a message.
-   * Unmapped emoji fall back to HEART (see reaction-map).
+   * `icon` is a Zalo icon code (see reaction-map `emojiToZalo`); `Reactions.NONE` ("")
+   * removes all of the account's reactions on the message.
    *
    * @throws when not logged in, or when the zca-js call fails
    */
@@ -609,11 +617,11 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     threadType: ZaloThreadType,
     msgId: string,
     cliMsgId: string,
-    emoji: string,
+    icon: string,
   ): Promise<void> {
     const api = this.api;
     if (!api) throw new Error('Not logged in');
-    await api.addReaction(emojiToZalo(emoji), {
+    await api.addReaction(icon as Reactions, {
       data: { msgId, cliMsgId },
       threadId,
       type: toThreadType(threadType),
@@ -788,8 +796,14 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
    * onBeforeSend fires AFTER the rate-limit wait, immediately before the network call —
    * echo-suppression TTLs must start at real send time, not enqueue time.
    *
+   * A text with a link is sent as a Zalo link card when Zalo can build a real preview
+   * (a title or thumbnail), so it doesn't show an empty "failed" card. Beeper's own
+   * preview (`preview`) overrides the card text so both sides show the same; when the
+   * owner removed the preview in Beeper (`preview === null`) the text goes out plain.
+   *
    * @param quote raw payload of the message being replied to (Matrix reply → Zalo quote)
    * @param mentions @mentions (uid + position/length in `text`)
+   * @param preview Beeper's link preview of the message, null when removed, undefined when unknown
    * @throws when not logged in, or when the zca-js send fails
    */
   async sendText(
@@ -799,6 +813,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     quote?: ZaloQuotePayload,
     onBeforeSend?: () => void,
     mentions?: ZaloMention[],
+    preview?: LinkPreviewHint | null,
   ): Promise<{ msgId: string | null }> {
     // Capture before the rate-limit wait — logout during the wait must not null-deref
     const api = this.api;
@@ -806,20 +821,34 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     await this.rateLimiter.acquire();
     onBeforeSend?.();
     const zaloType = toThreadType(threadType);
-    // A plain sendMessage link shows no preview on Zalo; sendLink makes Zalo build its own
-    // card. It takes no quote/mentions, so those messages stay plain text.
-    const link = !quote && !mentions?.length ? text.match(/https?:\/\/\S+/)?.[0] : undefined;
-    // Probe first: only an unparseable link falls back to plain text. A failed sendLink
-    // itself is not retried — Zalo may already have delivered it (no duplicates).
-    if (
-      link &&
-      (await api.parseLink(link).then(
-        () => true,
-        () => false,
-      ))
-    ) {
-      const sent = await api.sendLink({ msg: text, link }, threadId, zaloType);
-      return { msgId: sent?.msgId != null ? String(sent.msgId) : null };
+    // A plain sendMessage link shows no preview on Zalo; a link card does. Cards take no
+    // quote/mentions, so those messages stay plain text.
+    const link =
+      !quote && !mentions?.length && preview !== null
+        ? preview?.url && text.includes(preview.url)
+          ? preview.url
+          : firstLink(text)
+        : undefined;
+    // Probe first: an unparseable link, or one Zalo can't preview, goes out as plain text.
+    // A failed card send itself is not retried — Zalo may already have delivered it.
+    const parsed = link ? await api.parseLink(link).catch(() => null) : null;
+    if (link && parsed) {
+      const data: Partial<ParseLinkData> = parsed.data ?? {};
+      const title = preview?.title || data.title || '';
+      const description = preview?.description || data.desc || '';
+      if (!preview && (data.title || data.thumb)) {
+        const sent = await api.sendLink({ msg: text, link }, threadId, zaloType);
+        return { msgId: sent?.msgId != null ? String(sent.msgId) : null };
+      }
+      if (preview && (title || data.thumb)) {
+        const sent = await sendLinkCard(api, {
+          msg: text,
+          threadId,
+          type: zaloType,
+          card: { ...data, href: data.href || link, title, desc: description },
+        });
+        return { msgId: sent?.msgId != null ? String(sent.msgId) : null };
+      }
     }
     // A quote and/or mentions require the object form of MessageContent
     const payload =
@@ -829,4 +858,69 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     const result = await api.sendMessage(payload, threadId, zaloType);
     return { msgId: result.message?.msgId != null ? String(result.message.msgId) : null };
   }
+}
+
+/** Beeper's preview of a link in an outbound message (`com.beeper.linkpreviews`). */
+export type LinkPreviewHint = { url: string; title?: string; description?: string };
+
+/** Card fields Zalo's parseLink returns (zca-js ParseLinkResponse['data']). */
+type ParseLinkData = {
+  thumb: string;
+  title: string;
+  desc: string;
+  src: string;
+  href: string;
+  media: unknown;
+};
+
+/** First http(s) URL in `text`, without trailing sentence punctuation. */
+function firstLink(text: string): string | undefined {
+  const url = text.match(/https?:\/\/\S+/)?.[0]?.replace(/[.,;:!?'"]+$/, '');
+  // a closing bracket ends the sentence unless the URL opened one (wiki-style "Foo_(bar)")
+  return url?.endsWith(')') && !url.includes('(') ? url.slice(0, -1) : url;
+}
+
+type LinkCardProps = { msg: string; threadId: string; type: ThreadType; card: Partial<ParseLinkData> };
+
+const CARD_API = 'bridgeSendLinkCard';
+/** APIs that already have the custom card call (zca-js custom() defines a non-configurable property). */
+const cardApiInstalled = new WeakSet<API>();
+
+/**
+ * Sends a Zalo link card with the given title/description — zca-js sendLink, but with the
+ * card fields supplied instead of re-parsed, so Zalo shows what Beeper shows. Registered
+ * through zca-js `api.custom` (same endpoints and params as sendLink).
+ */
+async function sendLinkCard(api: API, props: LinkCardProps): Promise<{ msgId?: string | number } | null> {
+  if (!cardApiInstalled.has(api)) {
+    api.custom<{ msgId?: string | number } | null, LinkCardProps>(CARD_API, async ({ ctx, utils, props: p }) => {
+      const group = p.type === ThreadType.Group;
+      const url = group
+        ? utils.makeURL(`${api.zpwServiceMap.group[0]}/api/group/sendlink`, { nretry: 0 })
+        : utils.makeURL(`${api.zpwServiceMap.chat[0]}/api/message/link`, { nretry: 0 });
+      const href = p.card.href ?? '';
+      const params: Record<string, unknown> = {
+        msg: p.msg.includes(href) ? p.msg : `${p.msg} ${href}`,
+        href,
+        src: p.card.src ?? '',
+        title: p.card.title ?? '',
+        desc: p.card.desc ?? '',
+        thumb: p.card.thumb ?? '',
+        type: 2,
+        media: JSON.stringify(p.card.media ?? {}),
+        ttl: 0,
+        clientId: Date.now(),
+        ...(group ? { grid: p.threadId, imei: ctx.imei } : { toId: p.threadId, mentionInfo: '' }),
+      };
+      const encrypted = utils.encodeAES(JSON.stringify(params));
+      if (!encrypted) throw new Error('Failed to encrypt link card params');
+      const response = await utils.request(url, { method: 'POST', body: new URLSearchParams({ params: encrypted }) });
+      return utils.resolve(response) as Promise<{ msgId?: string | number } | null>;
+    });
+    cardApiInstalled.add(api);
+  }
+  const call = (api as unknown as Record<string, (p: LinkCardProps) => Promise<{ msgId?: string | number } | null>>)[
+    CARD_API
+  ];
+  return call!(props);
 }

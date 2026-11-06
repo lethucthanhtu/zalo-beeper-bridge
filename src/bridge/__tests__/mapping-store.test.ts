@@ -20,6 +20,28 @@ afterEach(() => {
 });
 
 describe('MappingStore', () => {
+  it('finds a bridged message by client msgId + sender (reply fallback)', () => {
+    store.recordMessage('g1', '!r:x', '$a', 'inbound', null, '111', 'alice');
+    store.recordMessage('g2', '!r:x', '$b', 'inbound', null, '111', 'bob');
+    store.recordMessage('g3', '!r:x', '$own', 'outbound', null, '222');
+    expect(store.getEventIdByCliMsgId('!r:x', '111', 'bob')).toBe('$b');
+    expect(store.getEventIdByCliMsgId('!r:x', '222', 'me')).toBe('$own'); // outbound rows have no sender
+    expect(store.getEventIdByCliMsgId('!other:x', '111', 'alice')).toBeNull();
+  });
+
+  it('tracks reactions per target and sender, and drops them with the room', () => {
+    store.insertPortal({ thread_id: 't1', thread_type: 'user', room_id: '!r:x', name: null });
+    const row = { room_id: '!r:x', target_msg_id: 'm1', sender_id: 'me', zalo_icon: '/-heart' };
+    store.recordReaction({ event_id: '$1', ...row });
+    store.recordReaction({ event_id: '$2', ...row, zalo_icon: '/-strong' });
+    store.recordReaction({ event_id: '$1', ...row, zalo_icon: 'ignored' });
+    expect(store.getReactions('m1', 'me').map((r) => r.zalo_icon)).toEqual(['/-heart', '/-strong']);
+    store.deleteReaction('$1');
+    expect(store.getReactionByEventId('$1')).toBeNull();
+    store.deletePortal('t1');
+    expect(store.getReactionByEventId('$2')).toBeNull();
+  });
+
   it('persists portals across reopen (restart survival)', () => {
     store.insertPortal({ thread_id: 't1', thread_type: 'user', room_id: '!r1:x', name: 'Alice' });
     store.close();

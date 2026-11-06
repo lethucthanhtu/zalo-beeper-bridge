@@ -1,5 +1,5 @@
 // Outbound pipeline: owner's Matrix events in a portal room → Zalo thread.
-// Handles text (+reply quote, +edit), images, reactions, and recalls.
+// Handles text (+reply quote, +edit), images, reactions (+removal), and recalls.
 // Guards against two echo loops:
 //   1. bridge-posted events (own phone messages double-puppeted as owner) — skipped via event_id
 //   2. selfListen re-delivery of what we just sent — registered with EchoSuppressor
@@ -9,9 +9,11 @@ import { isAdts, transcodeToAac } from './audio-remux.ts';
 import type { EchoSuppressor } from './echo-suppressor.ts';
 import { downloadMatrixMedia } from './media-handler.ts';
 import { mentionsFromUserIds, parseOutboundMentions } from './mentions.ts';
-import type { MappingStore, PortalRow } from './mapping-store.ts';
+import type { MappingStore, PortalRow, ReactionRow } from './mapping-store.ts';
 import type { PuppetRegistry } from './puppet-registry.ts';
-import type { ZaloClient } from '../zalo/zalo-client.ts';
+import { Reactions } from 'zca-js';
+import { emojiToZalo } from '../zalo/reaction-map.ts';
+import type { LinkPreviewHint, ZaloClient } from '../zalo/zalo-client.ts';
 import { errorMessage } from '../error-message.ts';
 
 /** Removes the Matrix rich-reply fallback ("> <@user> quoted text" lines + blank line). */
@@ -27,6 +29,28 @@ export function stripReplyFallback(body: string): string {
  * OutboundHandler can drop it deterministically and never loop it back to Zalo.
  */
 export const SELF_BRIDGE_MARKER = 'com.zalo-bridge.self';
+
+/**
+ * Beeper's link preview (`com.beeper.linkpreviews`) for the link in `body`: the first entry
+ * whose matched URL is in the text. Returns null when Beeper sent an empty list (no preview
+ * shown, e.g. the owner removed it) and undefined when the field is absent.
+ */
+export function linkPreviewHint(
+  content: Record<string, unknown> | undefined,
+  body: string,
+): LinkPreviewHint | null | undefined {
+  const previews = content?.['com.beeper.linkpreviews'];
+  if (!Array.isArray(previews)) return undefined;
+  for (const entry of previews as Array<Record<string, unknown>>) {
+    const url = [entry?.matched_url, entry?.['og:url']].find(
+      (value): value is string => typeof value === 'string' && body.includes(value),
+    );
+    if (!url) continue;
+    const text = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+    return { url, title: text(entry['og:title']), description: text(entry['og:description']) };
+  }
+  return previews.length === 0 ? null : undefined;
+}
 
 /**
  * Adds an event_id to the shared `bridgedEventIds` set, dropping the oldest entries once it
@@ -222,6 +246,12 @@ export class OutboundHandler {
       mentions = parseOutboundMentions(body, formattedBody, uidFromMxid);
     }
 
+    // Beeper's link preview of this message, so the Zalo card shows the same title/description
+    const preview = linkPreviewHint(
+      (isEdit ? content['m.new_content'] : content) as Record<string, unknown> | undefined,
+      body,
+    );
+
     // Echo guards armed for this send that have not been matched yet. A failed attempt
     // must disarm exactly the guards it armed: a send can fail before onBeforeSend runs
     // (nothing to cancel — cancelling would disarm another send's guard) or after it
@@ -248,6 +278,7 @@ export class OutboundHandler {
           quote,
           armGuard,
           mentions,
+          preview,
         );
       } catch (quoteErr) {
         if (!quote) throw quoteErr;
@@ -261,6 +292,7 @@ export class OutboundHandler {
           undefined,
           armGuard,
           mentions,
+          preview,
         );
       }
       if (sendResult.msgId)
@@ -368,30 +400,70 @@ export class OutboundHandler {
   }
 
   /**
-   * Mirrors the owner's Matrix reaction onto the bridged Zalo message. Ignores
-   * reactions from others, malformed relations and unbridged targets; a failed
-   * Zalo call is only logged.
+   * Mirrors the owner's Matrix reaction onto the bridged Zalo message and records it, so
+   * removing it later (a redaction) can be mirrored too and Zalo's echo of it is
+   * recognised. Ignores reactions the bridge itself posted (the owner's phone reactions),
+   * reactions from others, malformed relations and unbridged targets; a failed Zalo call
+   * is only logged.
    * @returns Always true (the event belonged to a portal).
    */
   private async handleReaction(event: WeakEvent, portal: PortalRow): Promise<boolean> {
     if (event.sender !== this.deps.ownerUserId) return true;
-    const relation = (event.content as { 'm.relates_to'?: { event_id?: string; key?: string } })['m.relates_to'];
+    const content = event.content as { 'm.relates_to'?: { event_id?: string; key?: string } };
+    if ((content as Record<string, unknown>)[SELF_BRIDGE_MARKER]) return true; // own phone reaction, mirrored in
+    if (event.event_id && this.deps.bridgedEventIds.has(event.event_id)) return true;
+    if (event.event_id && this.deps.store.getReactionByEventId(event.event_id)) return true; // transaction retry
+    const relation = content['m.relates_to'];
     if (!relation?.event_id || !relation.key) return true;
     const target = this.deps.store.getZaloTargetByEventId(relation.event_id);
     if (!target) return true;
+    const icon = emojiToZalo(relation.key);
+    const ownId = this.deps.zalo.ownId;
+    // Recorded BEFORE the send: Zalo's echo of this reaction can beat the send's response
+    if (event.event_id && ownId) {
+      this.deps.store.recordReaction({
+        event_id: event.event_id,
+        room_id: portal.room_id,
+        target_msg_id: target.zaloMsgId,
+        sender_id: ownId,
+        zalo_icon: icon,
+      });
+    }
     try {
       // Zalo accepts cliMsgId 0 when unknown (verified live against the undo/react endpoints)
-      await this.deps.zalo.react(
-        portal.thread_id,
-        portal.thread_type,
-        target.zaloMsgId,
-        target.cliMsgId ?? '0',
-        relation.key,
-      );
+      await this.deps.zalo.react(portal.thread_id, portal.thread_type, target.zaloMsgId, target.cliMsgId ?? '0', icon);
     } catch (err) {
+      if (event.event_id) this.deps.store.deleteReaction(event.event_id);
       console.warn('outbound reaction failed:', errorMessage(err));
     }
     return true;
+  }
+
+  /**
+   * The owner removed a reaction in Beeper → remove it on Zalo. Zalo only removes ALL of
+   * the account's reactions on a message at once, so the owner's remaining reactions on
+   * it are added back afterwards. The removal's own echo is guarded (EchoSuppressor).
+   */
+  private async removeReaction(reaction: ReactionRow, portal: PortalRow): Promise<void> {
+    this.deps.store.deleteReaction(reaction.event_id);
+    if (reaction.sender_id !== this.deps.zalo.ownId) return; // a contact's reaction: not ours to remove
+    const targetEventId = this.deps.store.getEventIdByMsgId(reaction.target_msg_id);
+    const target = targetEventId ? this.deps.store.getZaloTargetByEventId(targetEventId) : null;
+    const msgId = reaction.target_msg_id;
+    const cliMsgId = target?.cliMsgId ?? '0';
+    this.deps.echo.expectReactionRemoval(portal.thread_id, msgId);
+    try {
+      await this.deps.zalo.react(portal.thread_id, portal.thread_type, msgId, cliMsgId, Reactions.NONE);
+    } catch (err) {
+      this.deps.echo.cancelReactionRemoval(portal.thread_id, msgId);
+      await this.notice(portal.room_id, `⚠ Zalo reaction removal failed: ${errorMessage(err)}`);
+      return;
+    }
+    for (const remaining of this.deps.store.getReactions(msgId, reaction.sender_id)) {
+      await this.deps.zalo
+        .react(portal.thread_id, portal.thread_type, msgId, cliMsgId, remaining.zalo_icon)
+        .catch((err: unknown) => console.warn('re-adding a reaction failed:', errorMessage(err)));
+    }
   }
 
   /**
@@ -405,6 +477,12 @@ export class OutboundHandler {
     // `redacts` is top-level up to room v10 and inside content from v11
     const redactedEventId = (event as { redacts?: string }).redacts ?? (event.content as { redacts?: string }).redacts;
     if (!redactedEventId) return true;
+    // Un-reacting is a redaction of the m.reaction event
+    const reaction = this.deps.store.getReactionByEventId(redactedEventId);
+    if (reaction) {
+      await this.removeReaction(reaction, portal);
+      return true;
+    }
     const target = this.deps.store.getZaloTargetByEventId(redactedEventId);
     if (!target) return true; // not a bridged message
     // Zalo can only recall the account's OWN messages (same rule as the app)

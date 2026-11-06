@@ -7,6 +7,7 @@ import { loadConfig } from './config.ts';
 import { EchoSuppressor } from './bridge/echo-suppressor.ts';
 import { InboundHandler } from './bridge/inbound-handler.ts';
 import { MappingStore } from './bridge/mapping-store.ts';
+import { ownerIntent } from './bridge/owner-intent.ts';
 import { OutboundHandler } from './bridge/outbound-handler.ts';
 import { PortalManager } from './bridge/portal-manager.ts';
 import { PresenceHandler } from './bridge/presence-handler.ts';
@@ -212,7 +213,11 @@ zalo.on('message', (message) => {
   );
   inbound.handle(message);
 });
-const presence = new PresenceHandler(store, puppets, zalo, config.matrix.owner, () => zalo.ownId);
+const presence = new PresenceHandler(store, puppets, zalo, config.matrix.owner, () => zalo.ownId, {
+  ownerIntent: () => ownerIntent(bridge, config.matrix.owner),
+  bridgedEventIds,
+  echo: echoSuppressor,
+});
 // Zalo ephemeral signals → ghost read receipts / typing / reactions in Matrix (errors logged)
 zalo.on(
   'seen',
