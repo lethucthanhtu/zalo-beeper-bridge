@@ -8,7 +8,7 @@ import {
   ThreadType,
   type API,
   type Reactions,
-  type TGroupMessage,
+  type GetCloudMessageResponse,
 } from 'zca-js';
 import { loadCredentials, saveCredentials, clearCredentials } from './credential-store.ts';
 import { normalizeZaloMessage } from './event-normalizer.ts';
@@ -47,20 +47,6 @@ type ZaloClientEvents = {
   catchUp: [];
 };
 
-type GroupRecentProps = {
-  groupId: string;
-  count: number;
-  /** cloud cursor: 0 = newest, otherwise page back from this msgId */
-  globalMsgId: string;
-};
-
-type GroupRecentPage = {
-  msgs: GroupMessage[];
-  lastMsgId: string | null;
-  maxMsgId: string | null;
-  hasMore: boolean;
-};
-
 export type ListenerState = 'stopped' | 'connected' | 'reconnecting' | 'dead';
 
 /** zca-js ThreadType for a bridge thread type. */
@@ -88,6 +74,31 @@ const MEDIA_SEND_TIMEOUT_MS = 60_000;
 
 /** Upper bound for Zalo's server-side logout (three HTTP round trips) before the bridge logs out locally anyway. */
 const LOGOUT_TIMEOUT_MS = 15_000;
+
+/** getCloudMessage error code meaning "the server has nothing more to load": stop paging. */
+const CLOUD_NOTHING_MORE = -69;
+
+/** ZALO_WS_TRACE=1 diagnostics for one getCloudMessage reply: cursor metadata only, never message content. */
+function logCloudPage(groupId: string, cursor: string | undefined, page: GetCloudMessageResponse): void {
+  const fields = page as unknown as Record<string, unknown>;
+  const meta = [
+    'error',
+    'lastMsgId',
+    'minMsgId',
+    'maxMsgId',
+    'hasMore',
+    'isOld',
+    'isFiltered',
+    'tsJoinGroup',
+    'isFilteredByPhase',
+    'isFilteredByTimeJoin',
+  ]
+    .map((fieldName) => `${fieldName}=${String(fields[fieldName])}`)
+    .join(' ');
+  console.log(
+    `[zalo:http] getCloudMessage ${groupId} cursor=${cursor ?? 'newest'} msgs=${page.groupMsgs.length} ${meta}`,
+  );
+}
 
 /**
  * Rejects when `promise` has not settled within `ms` (default MEDIA_SEND_TIMEOUT_MS). zca-js
@@ -473,11 +484,14 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   /**
    * Recent group history, normalized and sorted oldest-first (best-effort backfill).
    * zca-js getGroupChatHistory hits /api/group/history, which Zalo removed (404,
-   * zca-js issues #356/#367); this calls the cloud-message endpoint Zalo Web uses
-   * now (zca-js PR #370), newest-first, max 50 per call. Cursor 0 can come back empty
-   * with only the cursor metadata, so the next call starts from maxMsgId, then pages
-   * back through lastMsgId while hasMore. At most 4 calls are made; a failure keeps
-   * whatever pages were already fetched (logged, never thrown).
+   * zca-js issues #356/#367); this uses zca-js getCloudMessage, the cloud-message
+   * endpoint Zalo Web uses now, which returns up to 50 messages per call, newest-first.
+   * The first call can come back empty with only the cursor metadata, so the next call
+   * starts from maxMsgId, then pages back through lastMsgId while hasMore. At most 4
+   * calls are made and only the newest `count` messages are kept. Zalo's "nothing more"
+   * answer (error -69, or an empty filtered page) ends paging quietly; any other failure
+   * keeps whatever pages were already fetched (logged, never thrown). With ZALO_WS_TRACE=1
+   * each reply's cursor metadata is logged (never message content).
    *
    * @param threadId Zalo group id
    * @param count desired number of messages (upper bound, not guaranteed)
@@ -485,94 +499,31 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   async getGroupHistory(threadId: string, count = 30): Promise<ZaloMessage[]> {
     const api = this.api;
     if (!api) return [];
-    const fetchPage = this.groupRecentApi(api);
     const rawMessagesById = new Map<string, GroupMessage>();
     try {
-      let cursor = '0';
+      let cursor: string | undefined;
+      let isOld: number | undefined;
       for (let call = 0; call < 4 && rawMessagesById.size < count; call++) {
-        const page = await fetchPage({
-          groupId: threadId,
-          count: Math.min(count - rawMessagesById.size, 50),
-          globalMsgId: cursor,
-        });
-        for (const msg of page.msgs) rawMessagesById.set(String(msg.data.msgId), msg);
-        const next = page.msgs.length === 0 && cursor === '0' ? page.maxMsgId : page.hasMore ? page.lastMsgId : null;
-        if (!next || next === '0' || next === cursor) break;
-        cursor = next;
+        const page = await api.getCloudMessage(threadId, cursor, isOld ? { isOld } : undefined);
+        if (process.env.ZALO_WS_TRACE === '1') logCloudPage(threadId, cursor, page);
+        for (const msg of page.groupMsgs) rawMessagesById.set(String(msg.data.msgId), msg);
+        if (page.groupMsgs.length === 0 && page.isFiltered) break;
+        const next =
+          page.groupMsgs.length === 0 && cursor === undefined ? page.maxMsgId : page.hasMore ? page.lastMsgId : null;
+        const nextCursor = next == null ? null : String(next);
+        if (!nextCursor || nextCursor === '0' || nextCursor === cursor) break;
+        cursor = nextCursor;
+        isOld = page.isOld;
       }
     } catch (err) {
-      console.warn(`group history (${threadId}) failed:`, errorMessage(err));
+      if ((err as { code?: unknown }).code !== CLOUD_NOTHING_MORE)
+        console.warn(`group history (${threadId}) failed:`, errorMessage(err));
     }
     return [...rawMessagesById.values()]
       .map((msg) => normalizeZaloMessage(msg as unknown as RawZaloMessage))
       .filter((message): message is ZaloMessage => message !== null)
-      .sort((a, b) => a.timestamp - b.timestamp);
-  }
-
-  /**
-   * Registers (once per logged-in API) the cloud group-history call via zca-js custom().
-   * The registered call GETs `<group_cloud_message>/api/cm/getrecentv2` with
-   * AES-encrypted params and maps the reply to a GroupRecentPage. With
-   * ZALO_WS_TRACE=1 it logs the reply's cursor metadata (never message content).
-   *
-   * @returns the page-fetch function (cached on the API object under `bridgeGroupRecent`)
-   */
-  private groupRecentApi(api: API): (props: GroupRecentProps) => Promise<GroupRecentPage> {
-    const name = 'bridgeGroupRecent';
-    const existing = (api as unknown as Record<string, unknown>)[name];
-    if (typeof existing === 'function') return existing as (props: GroupRecentProps) => Promise<GroupRecentPage>;
-    api.custom<GroupRecentPage, GroupRecentProps>(name, async ({ ctx, utils, props }) => {
-      // The service map lives on the API object (zca-js apis.d.ts), not on ctx
-      const serviceURL = utils.makeURL(`${api.zpwServiceMap.group_cloud_message[0]}/api/cm/getrecentv2`);
-      const params = {
-        groupId: props.groupId,
-        globalMsgId: Number(props.globalMsgId),
-        count: props.count,
-        msgIds: [],
-        imei: ctx.imei,
-        src: 3,
-      };
-      const encrypted = utils.encodeAES(JSON.stringify(params));
-      if (!encrypted) throw new Error('Failed to encrypt params');
-      const response = await utils.request(utils.makeURL(serviceURL, { params: encrypted, nretry: 0 }), {
-        method: 'GET',
-      });
-      return utils.resolve(response, (result) => {
-        const data = (typeof result.data === 'string' ? JSON.parse(result.data) : result.data) as {
-          groupMsgs?: TGroupMessage[];
-          lastMsgId?: string | number;
-          maxMsgId?: string | number;
-          hasMore?: number | boolean;
-        };
-        if (process.env.ZALO_WS_TRACE === '1') {
-          const replyFields = data as Record<string, unknown>;
-          const meta = [
-            'error',
-            'lastMsgId',
-            'minMsgId',
-            'maxMsgId',
-            'hasMore',
-            'isOld',
-            'isFiltered',
-            'tsJoinGroup',
-            'isFilteredByPhase',
-            'isFilteredByTimeJoin',
-          ]
-            .map((fieldName) => `${fieldName}=${String(replyFields[fieldName])}`)
-            .join(' ');
-          console.log(
-            `[zalo:http] getrecentv2 ${props.groupId} cursor=${props.globalMsgId} msgs=${data.groupMsgs?.length ?? 0} ${meta}`,
-          );
-        }
-        return {
-          msgs: (data.groupMsgs ?? []).map((raw) => new GroupMessage(ctx.uid, raw)),
-          lastMsgId: data.lastMsgId != null ? String(data.lastMsgId) : null,
-          maxMsgId: data.maxMsgId != null ? String(data.maxMsgId) : null,
-          hasMore: Boolean(data.hasMore),
-        };
-      });
-    });
-    return (api as unknown as Record<string, (props: GroupRecentProps) => Promise<GroupRecentPage>>)[name]!;
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .slice(-count);
   }
 
   /**

@@ -50,7 +50,7 @@ tail -f ~/zalo-beeper-bridge/logs/bridge.log   # path set in the plist
 | `history batch type=group\|user raw=N usable=N`             | One page of recent history was fetched.                                                                           |
 | `unhandled ws cmd N (subCmd N) — not bridged`               | Zalo sent an event type the bridge does not handle.                                                               |
 
-With `ZALO_WS_TRACE=1` the bridge also writes `[zalo:ws] cmd=… sub=… bytes=…` for every websocket frame and `[zalo:http] getrecentv2 <groupId> cursor=… msgs=N` for every history request. Use it only to debug; it is verbose.
+With `ZALO_WS_TRACE=1` the bridge also writes `[zalo:ws] cmd=… sub=… bytes=…` for every websocket frame and `[zalo:http] getCloudMessage <groupId> cursor=… msgs=N` plus the reply's cursor metadata (never message content) for every history request. Use it only to debug; it is verbose.
 
 ## `[bridge]`
 
