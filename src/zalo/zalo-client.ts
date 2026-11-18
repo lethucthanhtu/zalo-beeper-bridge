@@ -292,6 +292,17 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       const normalized = normalizeZaloMessage(raw as unknown as RawZaloMessage);
       if (normalized) this.emit('message', normalized);
     });
+    // Recall for everyone (by a contact or by us on another device). Same per-thread queue
+    // and msgId dedup as messages; the normalizer maps content.deleteMsg to kind 'recall'
+    this.api.listener.on('undo', (undo) => {
+      const normalized = normalizeZaloMessage({
+        type: undo.isGroup ? ThreadType.Group : ThreadType.User,
+        threadId: undo.threadId,
+        isSelf: undo.isSelf,
+        data: undo.data as unknown as RawZaloMessage['data'],
+      });
+      if (normalized) this.emit('message', normalized);
+    });
     // Zalo pushes recent messages per thread on connect — replay them through the
     // same pipeline (store-level msgId dedup makes this idempotent across restarts)
     this.api.listener.on('old_messages', (messages, type) => {

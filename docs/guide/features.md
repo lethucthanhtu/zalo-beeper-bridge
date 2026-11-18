@@ -18,7 +18,7 @@
 | Contact cards (danh thiếp)         |       ✅ QR code + name, phone and a `zalo.me` link        |                     —                      |
 | Web cards (`chat.webcontent`)      |               ✅ text (title + description)                |                     —                      |
 | Reactions                          |                             ✅                             |                     ✅                     |
-| Message recall                     |                             —                              |                     ✅                     |
+| Message recall                     |                  ✅ removed in Beeper too                  |                     ✅                     |
 | Deleted "for me" on another device |                  ✅ removed in Beeper too                  |                     —                      |
 | Read receipts                      |                             ✅                             |   ✅ (follows Beeper's receipt setting)    |
 | Typing indicators                  |                             ✅                             |    ✅ (follows Beeper's typing setting)    |
@@ -68,13 +68,15 @@ A Zalo contact card shows the contact's QR code with name and phone. The `zalo.m
 
 Only messages you sent from Beeper can be recalled on Zalo, and only within Zalo's recall window. Zalo lets you recall only your own messages.
 
+A message recalled on Zalo (by the sender, or by you on another device) is removed in Beeper too. Messages the bridge never bridged are skipped.
+
 ### Unknown message types
 
 A Zalo message type the bridge does not know shows as `[Zalo message type not supported by bridge: <type>]`. The log records the payload's field **names** (never values) so the type can be added. See [Troubleshooting](../troubleshooting#unknown-zalo-message-type).
 
 ## Not implemented
 
-- Recall and edit sync from Zalo to Beeper.
+- Edit sync from Zalo to Beeper.
 - End-to-end encrypted Zalo chats (they cannot be decrypted).
 - Live backfill of history from Zalo's servers. Zalo Web serves nothing from before the login. Use the [history importer](../history-import/).
 - Several Zalo accounts on one bridge. Run one bridge per account; see [Multiple accounts](./multiple-accounts).

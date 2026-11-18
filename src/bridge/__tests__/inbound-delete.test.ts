@@ -72,6 +72,75 @@ describe('InboundHandler — chat.delete ("delete for me" on another device)', (
   });
 });
 
+describe('InboundHandler — recall (undo) from Zalo', () => {
+  const setup = (threadType: 'user' | 'group') => {
+    const store = new MappingStore(':memory:');
+    const roomId = threadType === 'user' ? '!dm:x' : '!g:x';
+    store.insertPortal({ thread_id: 't1', thread_type: threadType, room_id: roomId, name: null });
+    store.recordMessage('m1', roomId, '$e1', 'inbound');
+    const redactEvent = vi.fn().mockResolvedValue('$redaction');
+    const ghostIntent = { matrixClient: { redactEvent } };
+    const botIntent = { matrixClient: { redactEvent } };
+    const deps = {
+      bridge: { getIntent: vi.fn(() => botIntent) },
+      store,
+      puppets: { intentFor: vi.fn(() => ghostIntent) },
+      portals: { getOrCreatePortal: vi.fn() },
+      echo: new EchoSuppressor(),
+      ownerUserId: '@owner:beeper.com',
+      mediaMaxBytes: 1,
+      resolveGroupName: async () => null,
+      resolveStickerUrl: async () => null,
+      getOwnZaloId: () => 'me',
+      bridgedEventIds: new Set<string>(),
+    };
+    const handler = new InboundHandler(deps as never);
+    const process = (message: ZaloMessage) =>
+      (handler as unknown as { process(message: ZaloMessage): Promise<void> }).process(message);
+    const recall = (msgId: string, recalledId: string, isSelf = false) =>
+      normalizeZaloMessage({
+        type: threadType === 'user' ? 0 : 1,
+        threadId: 't1',
+        isSelf,
+        data: {
+          msgId,
+          msgType: 'chat.undo',
+          uidFrom: isSelf ? 'me' : 't1',
+          ts: '1',
+          content: { globalMsgId: recalledId, cliMsgId: 1, deleteMsg: 1, srcId: 1, destId: 2 },
+        },
+      }) as ZaloMessage;
+    return { store, deps, redactEvent, process, recall, roomId };
+  };
+
+  it('redacts the bridged event as the DM ghost, once', async () => {
+    const { store, deps, redactEvent, process, recall } = setup('user');
+    await process(recall('u1', 'm1'));
+    await process(recall('u1', 'm1')); // replayed undo event
+    expect(deps.puppets.intentFor).toHaveBeenCalledWith('t1');
+    expect(redactEvent).toHaveBeenCalledTimes(1);
+    expect(redactEvent).toHaveBeenCalledWith('!dm:x', '$e1', 'Recalled on Zalo');
+    expect(deps.portals.getOrCreatePortal).not.toHaveBeenCalled();
+    store.close();
+  });
+
+  it('redacts as the bridge bot in a group, also for our own recall from the phone', async () => {
+    const { store, deps, redactEvent, process, recall } = setup('group');
+    await process(recall('u2', 'm1', true));
+    expect(deps.bridge.getIntent).toHaveBeenCalled();
+    expect(redactEvent).toHaveBeenCalledWith('!g:x', '$e1', 'Recalled on Zalo');
+    store.close();
+  });
+
+  it('skips a recall of a message that was never bridged', async () => {
+    const { store, redactEvent, process, recall } = setup('user');
+    await process(recall('u3', 'never-bridged'));
+    expect(redactEvent).not.toHaveBeenCalled();
+    expect(store.hasMessage('u3')).toBe(true);
+    store.close();
+  });
+});
+
 describe('InboundHandler — replies', () => {
   it("maps a quote by client msgId + sender when its global msgId isn't bridged", async () => {
     const store = new MappingStore(':memory:');

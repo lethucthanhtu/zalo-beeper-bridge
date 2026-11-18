@@ -45,6 +45,14 @@ function normalizeContent(msgType: string, content: unknown): ZaloContent {
     return { kind: 'delete', msgIds };
   }
   if (typeof content !== 'object' || content === null) return { kind: 'unsupported', msgType };
+  // Recall ("undo" for everyone): zca-js emits it as an `undo` event live, but catch-up
+  // batches (old_messages) carry the same payload as a plain message. Shape (zca-js TUndo):
+  // { globalMsgId, cliMsgId, deleteMsg, srcId, destId }; globalMsgId is the recalled msgId
+  if (Object.hasOwn(content, 'deleteMsg')) {
+    const recalledId = (content as { globalMsgId?: unknown }).globalMsgId;
+    const isId = typeof recalledId === 'string' || typeof recalledId === 'number';
+    return { kind: 'recall', msgIds: isId && String(recalledId) !== '0' ? [String(recalledId)] : [] };
+  }
   const card = content as AttachmentContent;
   // Rich text (bold/colour, or text Zalo formats itself, e.g. many @mentions): the plain
   // text is in the title. shortcut: styles in params are dropped, map them to HTML if wanted
