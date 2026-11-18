@@ -86,21 +86,21 @@ function sentMsgIds(result: {
 /** Upper bound for one attachment upload/send to Zalo before the bridge gives up. */
 const MEDIA_SEND_TIMEOUT_MS = 60_000;
 
+/** Upper bound for Zalo's server-side logout (three HTTP round trips) before the bridge logs out locally anyway. */
+const LOGOUT_TIMEOUT_MS = 15_000;
+
 /**
- * Rejects when `promise` has not settled within MEDIA_SEND_TIMEOUT_MS. zca-js attachment
- * uploads wait for a websocket "file_done" ack and never reject when it doesn't come
- * (e.g. the listener is down), which would leave the send — and the Beeper user — waiting
+ * Rejects when `promise` has not settled within `ms` (default MEDIA_SEND_TIMEOUT_MS). zca-js
+ * attachment uploads wait for a websocket "file_done" ack and never reject when it doesn't
+ * come (e.g. the listener is down), which would leave the send — and the Beeper user — waiting
  * forever. The underlying request is not cancelled, only no longer awaited.
  *
  * @throws Error naming the step that timed out
  */
-async function withSendTimeout<T>(promise: Promise<T>, step: string): Promise<T> {
+async function withSendTimeout<T>(promise: Promise<T>, step: string, ms = MEDIA_SEND_TIMEOUT_MS): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`${step} timed out after ${MEDIA_SEND_TIMEOUT_MS / 1000}s`)),
-      MEDIA_SEND_TIMEOUT_MS,
-    );
+    timer = setTimeout(() => reject(new Error(`${step} timed out after ${ms / 1000}s`)), ms);
   });
   try {
     return await Promise.race([promise, timeout]);
@@ -370,12 +370,32 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     this.listenerState = 'stopped';
   }
 
-  /** Stops listening, drops the API session and deletes the saved credentials and their key file from disk. */
-  logout(): void {
+  /**
+   * Stops listening, asks Zalo to end the session (zca-js `logout`, which expires the session
+   * cookies server-side), then drops the API session and deletes the saved credentials and
+   * their key file from disk. The local logout always happens, even when the server call
+   * fails or times out. The session is held until the server call settles, so a `login`
+   * during the wait is refused instead of having its fresh credentials wiped.
+   *
+   * @returns whether Zalo confirmed the server-side logout, and the error when it did not
+   */
+  async logout(): Promise<{ serverLoggedOut: boolean; error?: string }> {
+    const api = this.api;
     this.stopListening();
+    let result: { serverLoggedOut: boolean; error?: string } = { serverLoggedOut: false };
+    if (api) {
+      try {
+        await withSendTimeout(api.logout(), 'Zalo logout', LOGOUT_TIMEOUT_MS);
+        result = { serverLoggedOut: true };
+      } catch (err) {
+        result = { serverLoggedOut: false, error: errorMessage(err) };
+        console.warn('Zalo server logout failed (logging out locally anyway):', result.error);
+      }
+    }
     this.api = null;
     clearCredentials(this.opts.credsPath);
     this.emit('loggedOut');
+    return result;
   }
 
   /**

@@ -35,7 +35,9 @@ If a session is already active the bot refuses with `Already logged in to Zalo â
 
 ## `logout`
 
-Stops the listener, logs out of Zalo and deletes the saved session file. Beeper then shows the account as logged out. Existing rooms and the database stay; log in again with `login`.
+Stops the listener, ends the session on Zalo's servers and deletes the saved session file. Beeper then shows the account as logged out. Existing rooms and the database stay; log in again with `login`.
+
+If Zalo does not confirm the logout within 15 seconds (for example, the network is down), the bridge still logs out locally and says so in its reply. The session may then still be listed under logged-in devices in the Zalo app; remove it there.
 
 ## `status`
 
