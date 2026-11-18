@@ -98,8 +98,9 @@ export class InboundHandler {
   }
 
   /**
-   * Zalo "delete for me" (the account deleted messages on another device) → redacts their
-   * bridged Matrix events, so Beeper shows what the Zalo account shows. Redacted by the
+   * Zalo "delete for me" (the account deleted messages on another device) or a recall by
+   * the sender (for everyone) → redacts their bridged Matrix events, so Beeper shows what
+   * the Zalo account shows. Redacted by the
    * room's creator (the ghost for a DM, the bot for a group) and never as the owner:
    * OutboundHandler turns an owner redaction into a Zalo recall for everyone. Messages that
    * were never bridged are skipped; no portal is created for a deletion.
@@ -107,22 +108,26 @@ export class InboundHandler {
   private async redactDeleted(msg: ZaloMessage, msgIds: string[]): Promise<void> {
     const portal = this.deps.store.getPortalByThread(msg.threadId);
     if (!portal) return;
+    const isRecall = msg.content.kind === 'recall';
     if (msgIds.length === 0) {
-      const keys = Array.isArray(msg.quotable?.content)
-        ? Object.keys((msg.quotable.content as unknown[])[0] ?? {}).join(',')
-        : typeof msg.quotable?.content;
-      console.warn(`[bridge] chat.delete without message ids (item keys: ${keys})`);
+      const raw = msg.quotable?.content;
+      const sample = Array.isArray(raw) ? (raw[0] ?? {}) : raw;
+      const keys = typeof sample === 'object' && sample !== null ? Object.keys(sample).join(',') : typeof sample;
+      console.warn(`[bridge] ${isRecall ? 'recall' : 'chat.delete'} without message ids (keys: ${keys})`);
     }
     const intent =
       portal.thread_type === 'user' ? this.deps.puppets.intentFor(portal.thread_id) : this.deps.bridge.getIntent();
     for (const zaloMsgId of msgIds) {
       const target = this.deps.store.getEventByZaloMsgId(zaloMsgId);
-      if (!target?.eventId) continue;
+      if (!target?.eventId) {
+        if (isRecall) console.log(`[bridge] recall of a message that was never bridged (thread ${msg.threadId})`);
+        continue;
+      }
       await intent.matrixClient
-        .redactEvent(target.roomId, target.eventId, 'Deleted on Zalo')
+        .redactEvent(target.roomId, target.eventId, isRecall ? 'Recalled on Zalo' : 'Deleted on Zalo')
         .catch((err: unknown) => console.warn(`[bridge] redact ${target.eventId} failed:`, errorMessage(err)));
     }
-    this.deps.store.recordMessage(msg.msgId, portal.room_id, null, 'inbound'); // dedup a replayed delete
+    this.deps.store.recordMessage(msg.msgId, portal.room_id, null, 'inbound'); // dedup a replayed delete/recall
   }
 
   /**
@@ -155,7 +160,7 @@ export class InboundHandler {
       return;
     }
 
-    if (msg.content.kind === 'delete') {
+    if (msg.content.kind === 'delete' || msg.content.kind === 'recall') {
       await this.redactDeleted(msg, msg.content.msgIds);
       return;
     }

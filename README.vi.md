@@ -52,7 +52,7 @@ Tài liệu là một trang [VitePress](https://vitepress.dev/): chạy `npm run
 | Danh thiếp                          |   ✅ mã QR + tên, số điện thoại và link `zalo.me`   |                       —                       |
 | Thẻ web (`chat.webcontent`)         |            ✅ văn bản (tiêu đề + mô tả)             |                       —                       |
 | Biểu cảm (reaction)                 |                         ✅                          |                      ✅                       |
-| Thu hồi tin nhắn                    |                          —                          |                      ✅                       |
+| Thu hồi tin nhắn                    |              ✅ xoá luôn trong Beeper               |                      ✅                       |
 | "Xoá ở phía tôi" trên thiết bị khác |             ✅ cũng bị xoá trong Beeper             |                       —                       |
 | Đã xem (read receipt)               |                         ✅                          |   ✅ (theo cài đặt read receipt của Beeper)   |
 | Đang soạn tin (typing)              |                         ✅                          |      ✅ (theo cài đặt typing của Beeper)      |
@@ -69,7 +69,7 @@ Ngoài ra bridge còn:
 - Giới hạn tốc độ gửi tin đi.
 - Lưu phiên đăng nhập Zalo ở dạng mã hoá.
 
-**Chưa hỗ trợ:** đồng bộ thu hồi và chỉnh sửa từ Zalo sang Beeper, bridge các chat mã hoá đầu cuối, và tải lịch sử trực tiếp từ máy chủ Zalo (Zalo Web không trả về gì từ trước lúc đăng nhập, nên hãy dùng công cụ nhập lịch sử). Chi tiết xem [Features](docs/guide/features.md).
+**Chưa hỗ trợ:** đồng bộ chỉnh sửa từ Zalo sang Beeper, bridge các chat mã hoá đầu cuối, và tải lịch sử trực tiếp từ máy chủ Zalo (Zalo Web không trả về gì từ trước lúc đăng nhập, nên hãy dùng công cụ nhập lịch sử). Chi tiết xem [Features](docs/guide/features.md).
 
 ## Bắt đầu nhanh (container)
 

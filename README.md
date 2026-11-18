@@ -52,7 +52,7 @@ The docs are a [VitePress](https://vitepress.dev/) site: `npm run docs:dev` prev
 | Contact cards (danh thiếp)         |       ✅ QR code + name, phone and a `zalo.me` link        |                     —                      |
 | Web cards (`chat.webcontent`)      |               ✅ text (title + description)                |                     —                      |
 | Reactions                          |                             ✅                             |                     ✅                     |
-| Message recall                     |                             —                              |                     ✅                     |
+| Message recall                     |                  ✅ removed in Beeper too                  |                     ✅                     |
 | Deleted "for me" on another device |                  ✅ removed in Beeper too                  |                     —                      |
 | Read receipts                      |                             ✅                             |   ✅ (follows Beeper's receipt setting)    |
 | Typing indicators                  |                             ✅                             |    ✅ (follows Beeper's typing setting)    |
@@ -69,7 +69,7 @@ The bridge also does the following:
 - Rate-limits outbound messages.
 - Stores the Zalo session encrypted.
 
-**Not implemented:** syncing Zalo recalls and edits to Beeper, bridging end-to-end encrypted chats, and live backfill from Zalo's servers (Zalo Web serves nothing from before the login, so use the history importer). See [Features](docs/guide/features.md) for the details.
+**Not implemented:** syncing Zalo edits to Beeper, bridging end-to-end encrypted chats, and live backfill from Zalo's servers (Zalo Web serves nothing from before the login, so use the history importer). See [Features](docs/guide/features.md) for the details.
 
 ## Quick start (container)
 

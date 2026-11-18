@@ -16,6 +16,8 @@ export type ZaloContent =
   | { kind: 'media'; media: MediaDescriptor }
   /** the account deleted these messages "for me" on another device (chat.delete) */
   | { kind: 'delete'; msgIds: string[] }
+  /** the sender recalled (undo) these messages for everyone; content.deleteMsg is set */
+  | { kind: 'recall'; msgIds: string[] }
   | { kind: 'unsupported'; msgType: string };
 
 export type ZaloMessage = {

@@ -386,3 +386,29 @@ describe('normalizeZaloMessage', () => {
     expect(msg?.content).toEqual({ kind: 'unsupported', msgType: 'e2ee' });
   });
 });
+
+describe('normalizeZaloMessage — recall (undo)', () => {
+  // zca-js TUndo shape; the same payload arrives in catch-up batches as a plain message
+  const undo = (content: Record<string, unknown>): RawZaloMessage => ({
+    type: 1,
+    threadId: '2222222222222222222',
+    isSelf: false,
+    data: { msgId: 'u1', msgType: 'chat.undo', uidFrom: '1111111111111111111', ts: '1', content },
+  });
+
+  it('maps content.deleteMsg to a recall of globalMsgId', () => {
+    const msg = normalizeZaloMessage(
+      undo({ globalMsgId: 7998805079701, cliMsgId: 1, deleteMsg: 1, srcId: 1, destId: 2 }),
+    );
+    expect(msg?.content).toEqual({ kind: 'recall', msgIds: ['7998805079701'] });
+    expect(msg?.threadType).toBe('group');
+  });
+
+  it('yields no ids when globalMsgId is missing or zero', () => {
+    expect(normalizeZaloMessage(undo({ deleteMsg: 1 }))?.content).toEqual({ kind: 'recall', msgIds: [] });
+    expect(normalizeZaloMessage(undo({ deleteMsg: 1, globalMsgId: 0 }))?.content).toEqual({
+      kind: 'recall',
+      msgIds: [],
+    });
+  });
+});
