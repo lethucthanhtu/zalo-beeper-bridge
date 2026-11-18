@@ -61,6 +61,25 @@ async function handleLogin(context: BotCommandContext, roomId: string): Promise<
 }
 
 /**
+ * `logout` command: logs out on Zalo's servers and locally, then reports which of the two happened.
+ *
+ * @param context - Bot command context.
+ * @param roomId - Management room to answer in.
+ */
+async function handleLogout(context: BotCommandContext, roomId: string): Promise<void> {
+  const wasLoggedIn = context.zalo.isLoggedIn;
+  const { serverLoggedOut, error } = await context.zalo.logout();
+  let reply: string;
+  if (serverLoggedOut) reply = 'Logged out of Zalo (session ended on Zalo too); saved credentials cleared.';
+  else if (!wasLoggedIn) reply = 'No active Zalo session; saved credentials cleared.';
+  else
+    reply =
+      `Logged out locally and saved credentials cleared, but Zalo did not confirm the logout (${error ?? 'unknown error'}). ` +
+      'The bridge session may still be listed under logged-in devices in the Zalo app; remove it there if so.';
+  await context.bridge.getIntent().sendText(roomId, reply);
+}
+
+/**
  * `status` command: posts bridge uptime, Zalo login state and listener state.
  *
  * @param context - Bot command context.
@@ -141,8 +160,7 @@ export async function handleBotEvent(context: BotCommandContext, event: WeakEven
       await handleLogin(context, event.room_id);
       return true;
     case 'logout':
-      context.zalo.logout();
-      await context.bridge.getIntent().sendText(event.room_id, 'Logged out of Zalo; saved credentials cleared.');
+      await handleLogout(context, event.room_id);
       return true;
     case 'status':
       await handleStatus(context, event.room_id);
