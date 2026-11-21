@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeCall } from '../call-message.ts';
+import { callActionMessage, describeCall } from '../call-message.ts';
 import { normalizeZaloMessage } from '../event-normalizer.ts';
 
 describe('describeCall', () => {
@@ -18,10 +18,26 @@ describe('describeCall', () => {
     expect(describeCall('recommened.misscall', '{"isCaller":1}')).toBe('📞 Cuộc gọi đi không được trả lời');
     expect(describeCall('recommened.calltime', '{broken')).toBe('📞 Cuộc gọi đến');
   });
+
+  it('can leave out the icon (Beeper draws its own for call action messages)', () => {
+    expect(describeCall('recommened.calltime', '{"duration":26,"calltype":1}', { icon: false })).toBe(
+      'Cuộc gọi video đến · 0:26',
+    );
+    expect(describeCall('recommened.misscall', '{}', { icon: false })).toBe('Cuộc gọi nhỡ');
+  });
+});
+
+describe('callActionMessage', () => {
+  it('builds the com.beeper.action_message call payload from the call type', () => {
+    expect(callActionMessage('{"calltype":1}')).toEqual({ type: 'call', call_type: 'video' });
+    expect(callActionMessage({ calltype: 0 })).toEqual({ type: 'call', call_type: 'voice' });
+    expect(callActionMessage('{broken')).toEqual({ type: 'call', call_type: 'voice' });
+    expect(callActionMessage(undefined)).toEqual({ type: 'call', call_type: 'voice' });
+  });
 });
 
 describe('live call bubbles', () => {
-  it('normalizes a chat.recommended call bubble to a notice instead of unsupported', () => {
+  it('normalizes a chat.recommended call bubble to a call instead of unsupported', () => {
     const normalized = normalizeZaloMessage({
       type: 0,
       threadId: '111',
@@ -40,6 +56,10 @@ describe('live call bubbles', () => {
         },
       },
     });
-    expect(normalized?.content).toEqual({ kind: 'notice', text: '📞 Cuộc gọi đến · 0:10' });
+    expect(normalized?.content).toEqual({
+      kind: 'call',
+      text: 'Cuộc gọi đến · 0:10',
+      action: { type: 'call', call_type: 'voice' },
+    });
   });
 });

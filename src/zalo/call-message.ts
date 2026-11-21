@@ -15,6 +15,27 @@ type CallParams = {
   calltype?: number;
 };
 
+/**
+ * Beeper's `com.beeper.action_message` content field (mautrix-go `event.BeeperActionMessage`).
+ * Beeper clients render an m.text event that carries it as a call tile instead of a text
+ * bubble; clients that don't know it just show the body.
+ */
+export type BeeperActionMessage = { type: 'call'; call_type: 'voice' | 'video' };
+
+/** Parses the card `params` (JSON string or object); malformed params yield {}. */
+function parseCallParams(params: unknown): CallParams {
+  try {
+    return ((typeof params === 'string' ? JSON.parse(params) : params) ?? {}) as CallParams;
+  } catch {
+    return {};
+  }
+}
+
+/** The `com.beeper.action_message` payload for a Zalo call bubble (voice unless calltype is 1). */
+export function callActionMessage(params: unknown): BeeperActionMessage {
+  return { type: 'call', call_type: Number(parseCallParams(params).calltype) === 1 ? 'video' : 'voice' };
+}
+
 /** Seconds → "m:ss" (or "h:mm:ss" for calls of an hour or more). */
 function formatDuration(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600);
@@ -31,22 +52,19 @@ function formatDuration(totalSeconds: number): string {
  * @param action the card action (`recommened.calltime` or `recommened.misscall`)
  * @param params the card's `params` (JSON string or already-parsed object); unparsable
  *   or missing params still yield a generic call line
+ * @param options.icon prefix the 📞/📹 emoji (default true); off for call action messages,
+ *   where Beeper draws its own call icon
  */
-export function describeCall(action: string, params: unknown): string {
-  let call: CallParams = {};
-  try {
-    call = (typeof params === 'string' ? JSON.parse(params) : (params ?? {})) as CallParams;
-  } catch {
-    // malformed params — fall back to the generic wording below
-  }
+export function describeCall(action: string, params: unknown, options: { icon?: boolean } = {}): string {
+  const call = parseCallParams(params);
   const isVideo = Number(call.calltype) === 1;
-  const icon = isVideo ? '📹' : '📞';
+  const icon = options.icon === false ? '' : isVideo ? '📹 ' : '📞 ';
   const kind = isVideo ? 'Cuộc gọi video' : 'Cuộc gọi';
   const outgoing = Number(call.isCaller) === 1;
   if (action === 'recommened.misscall') {
-    return outgoing ? `${icon} ${kind} đi không được trả lời` : `${icon} ${kind} nhỡ`;
+    return outgoing ? `${icon}${kind} đi không được trả lời` : `${icon}${kind} nhỡ`;
   }
   const seconds = Number(call.duration);
   const length = Number.isFinite(seconds) && seconds > 0 ? ` · ${formatDuration(seconds)}` : '';
-  return `${icon} ${kind} ${outgoing ? 'đi' : 'đến'}${length}`;
+  return `${icon}${kind} ${outgoing ? 'đi' : 'đến'}${length}`;
 }

@@ -223,6 +223,16 @@ export class InboundHandler {
         eventId = sent.event_id;
         break;
       }
+      case 'call': {
+        const sent = await intent.sendMessage(portal.room_id, {
+          msgtype: 'm.text',
+          body: msg.content.text,
+          'com.beeper.action_message': msg.content.action,
+          ...extraContent,
+        });
+        eventId = sent.event_id;
+        break;
+      }
       case 'photo': {
         try {
           const bridged = await bridgeInboundPhoto(

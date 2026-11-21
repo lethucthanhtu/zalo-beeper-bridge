@@ -1,7 +1,7 @@
 // Raw zca-js message → ZaloMessage. All zca-js payload quirks live here.
 import { toMatrixWaveform, type MediaDescriptor } from '../bridge/media-content.ts';
 import type { RawZaloMessage, ZaloContent, ZaloMessage } from './types.ts';
-import { CALL_ACTIONS, describeCall } from './call-message.ts';
+import { CALL_ACTIONS, callActionMessage, describeCall } from './call-message.ts';
 
 /** Object-form message content (media, cards, rich text); every field is optional. */
 type AttachmentContent = {
@@ -77,9 +77,13 @@ function normalizeContent(msgType: string, content: unknown): ZaloContent {
       return { kind: 'sticker', id: sticker.id, catId: sticker.catId };
     }
   }
-  // Call log bubbles are link cards without an href — render them as a call line
+  // Call log bubbles are link cards without an href — bridge them as a Beeper call tile
   if (card.action && CALL_ACTIONS.has(card.action)) {
-    return { kind: 'notice', text: describeCall(card.action, card.params) };
+    return {
+      kind: 'call',
+      text: describeCall(card.action, card.params, { icon: false }),
+      action: callActionMessage(card.params),
+    };
   }
   const media = normalizeMedia(msgType, card);
   if (media) return { kind: 'media', media };

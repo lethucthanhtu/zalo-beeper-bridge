@@ -5,7 +5,7 @@
 // importer can post them like the live bridge does (m.image / m.sticker / m.video /
 // m.file / m.audio); `content` is the readable text used when no copy is reachable
 // (Zalo CDN links expire ~14 days after sending).
-import { CALL_ACTIONS, describeCall } from '../zalo/call-message.ts';
+import { CALL_ACTIONS, callActionMessage, describeCall, type BeeperActionMessage } from '../zalo/call-message.ts';
 import type { ZaloMention } from '../zalo/types.ts';
 import { toMatrixWaveform, type LinkPreview, type MediaDescriptor } from './media-content.ts';
 
@@ -48,7 +48,7 @@ export type ImportEvent = {
   timestamp: number;
   sender: ImportSender;
   /** Matrix m.room.message content: the text itself, or the fallback when media is unreachable */
-  content: { msgtype: 'm.text' | 'm.notice'; body: string };
+  content: { msgtype: 'm.text' | 'm.notice'; body: string; 'com.beeper.action_message'?: BeeperActionMessage };
   media?: ImportMedia;
   linkPreview?: LinkPreview;
   mentions?: ZaloMention[];
@@ -137,6 +137,8 @@ function fillTemplate(params: JsonObject): string {
 type Rendered = {
   body: string;
   notice: boolean;
+  /** call log bubble: Beeper call tile payload */
+  action?: BeeperActionMessage;
   media?: ImportMedia;
   linkPreview?: LinkPreview;
 };
@@ -261,7 +263,11 @@ function render(row: ExportRow): Rendered {
     case 6: {
       if (CALL_ACTIONS.has(asText(attachment.action))) {
         // the title is the literal "sendBubbleMessage" — the call details are in params
-        return { body: describeCall(asText(attachment.action), attachment.params), notice: true };
+        return {
+          body: describeCall(asText(attachment.action), attachment.params, { icon: false }),
+          notice: false,
+          action: callActionMessage(attachment.params),
+        };
       }
       const href = asText(attachment.href);
       const label = title && title !== href ? title : asText(params.mediaTitle) || desc;
@@ -299,7 +305,7 @@ function render(row: ExportRow): Rendered {
  */
 export function renderExportRow(row: ExportRow, threadType: 'user' | 'group', threadId: string): ImportEvent | null {
   if (!row.msgId || !row.sendDttm) return null;
-  const { body, notice, media, linkPreview } = render(row);
+  const { body, notice, action, media, linkPreview } = render(row);
   if (!body.trim()) return null;
 
   const sender: ImportSender =
@@ -331,7 +337,11 @@ export function renderExportRow(row: ExportRow, threadType: 'user' | 'group', th
     cliMsgId: row.cliMsgId != null ? String(row.cliMsgId) : undefined,
     timestamp: Number(row.sendDttm),
     sender,
-    content: { msgtype: notice ? 'm.notice' : 'm.text', body },
+    content: {
+      msgtype: notice ? 'm.notice' : 'm.text',
+      body,
+      ...(action ? { 'com.beeper.action_message': action } : {}),
+    },
     ...(media ? { media } : {}),
     ...(linkPreview ? { linkPreview } : {}),
     ...(mentions.length ? { mentions } : {}),

@@ -12,6 +12,10 @@ This repository is a fork of
 
 ### Added
 
+- Zalo call logs (voice, video, missed) now show as Beeper call tiles instead of notice text.
+  They are posted as `m.text` with `com.beeper.action_message` (`type: call`, `call_type:
+voice|video`), the same as mautrix-meta does since November 2026; the body ("Cuộc gọi video
+  đến · 1:05") stays as the fallback for other clients. The history importer does the same.
 - A documentation site in `docs/` (VitePress): guides, deployment, history import,
   troubleshooting, FAQ, security and reference pages. Preview it with `npm run docs:dev`.
   The README now has a Vietnamese version (`README.vi.md`).

@@ -191,3 +191,61 @@ describe('InboundHandler — replies', () => {
     store.close();
   });
 });
+
+describe('InboundHandler — call log bubbles', () => {
+  it('posts a call as m.text with com.beeper.action_message so Beeper draws a call tile', async () => {
+    const store = new MappingStore(':memory:');
+    store.insertPortal({ thread_id: 'alice', thread_type: 'user', room_id: '!dm:x', name: null });
+    const sendMessage = vi.fn().mockResolvedValue({ event_id: '$call' });
+    const ghostIntent = { sendMessage, join: vi.fn() };
+    const deps = {
+      bridge: { getIntent: vi.fn() },
+      store,
+      puppets: {
+        intentFor: vi.fn(() => ghostIntent),
+        ensurePuppet: vi.fn(async () => ghostIntent),
+        mxidFor: vi.fn(() => '@zalo_alice:x'),
+        ensureInRoom: vi.fn(async () => undefined),
+      },
+      portals: {
+        getOrCreatePortal: vi.fn(async () => store.getPortalByThread('alice')),
+        ensureGhostInRoom: vi.fn(async () => undefined),
+      },
+      echo: new EchoSuppressor(),
+      ownerUserId: '@owner:beeper.com',
+      mediaMaxBytes: 1,
+      resolveGroupName: async () => null,
+      resolveStickerUrl: async () => null,
+      getOwnZaloId: () => 'me',
+      bridgedEventIds: new Set<string>(),
+    };
+    const handler = new InboundHandler(deps as never);
+    const msg = normalizeZaloMessage({
+      type: 0,
+      threadId: 'alice',
+      isSelf: false,
+      data: {
+        msgId: 'c1',
+        msgType: 'chat.recommended',
+        uidFrom: 'alice',
+        ts: '3',
+        content: {
+          title: 'sendBubbleMessage',
+          href: '',
+          action: 'recommened.misscall',
+          params: '{"duration":0,"isCaller":0,"calltype":1}',
+        },
+      },
+    }) as ZaloMessage;
+    await (handler as unknown as { process(message: ZaloMessage): Promise<void> }).process(msg);
+    expect(sendMessage).toHaveBeenCalledWith(
+      '!dm:x',
+      expect.objectContaining({
+        msgtype: 'm.text',
+        body: 'Cuộc gọi video nhỡ',
+        'com.beeper.action_message': { type: 'call', call_type: 'video' },
+      }),
+    );
+    store.close();
+  });
+});
