@@ -1,6 +1,7 @@
 // Normalized Zalo event model — the only shapes the bridge layer sees.
 // Derived from live fixtures captured in Phase 1 (plans/.../reports/phase-01-spike-findings.md).
 import type { LinkPreview, MediaDescriptor } from '../bridge/media-content.ts';
+import type { BeeperActionMessage } from './call-message.ts';
 
 export type ZaloThreadType = 'user' | 'group';
 
@@ -8,6 +9,8 @@ export type ZaloContent =
   | { kind: 'text'; text: string; linkPreview?: LinkPreview }
   /** system-style line posted as m.notice (e.g. a call log bubble) */
   | { kind: 'notice'; text: string }
+  /** call log bubble: posted as m.text + com.beeper.action_message (Beeper call tile) */
+  | { kind: 'call'; text: string; action: BeeperActionMessage }
   | { kind: 'photo'; url: string; thumbUrl?: string; width?: number; height?: number; caption?: string }
   /** shared location → m.location; `text` is the fallback body (label, address, maps link) */
   | { kind: 'location'; latitude: number; longitude: number; label: string; text: string }

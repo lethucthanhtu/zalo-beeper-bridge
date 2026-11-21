@@ -182,7 +182,7 @@ describe('renderExportRow', () => {
     expect(media?.quote).toEqual({ msgId: undefined, fromName: 'Cody', text: '[đính kèm]' });
   });
 
-  it('turns link cards into a link preview and calls into a notice', () => {
+  it('turns link cards into a link preview and calls into a call action message', () => {
     const event = renderExportRow(
       {
         ...base,
@@ -221,7 +221,11 @@ describe('renderExportRow', () => {
       'user',
       '456',
     );
-    expect(call?.content).toEqual({ msgtype: 'm.notice', body: '📞 Cuộc gọi đi · 0:10' });
+    expect(call?.content).toEqual({
+      msgtype: 'm.text',
+      body: 'Cuộc gọi đi · 0:10',
+      'com.beeper.action_message': { type: 'call', call_type: 'voice' },
+    });
   });
 
   it("drops the owner's shadow copies (msgId_NNN with the real row present)", () => {

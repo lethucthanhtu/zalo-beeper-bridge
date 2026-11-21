@@ -408,6 +408,8 @@ async function buildEvent(
 
   const body = (event.quote && !replyTo ? quoteFallback(event.quote) : '') + event.content.body;
   const content: Record<string, unknown> = { msgtype: event.content.msgtype, body, ...replyRelation };
+  const action = event.content['com.beeper.action_message'];
+  if (action) content['com.beeper.action_message'] = action;
   if (event.linkPreview) {
     content['com.beeper.linkpreviews'] = [
       await buildLinkPreview(upload, event.linkPreview, config.bridge.mediaMaxBytes, IMPORT_FETCH_TIMEOUT_MS),

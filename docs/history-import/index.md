@@ -12,16 +12,17 @@ Each chat is rebuilt as a new Beeper room with its complete history in order and
 
 Imported messages are rendered exactly like live ones; both use `src/bridge/media-content.ts`.
 
-| Zalo message                                          | In Beeper                                                            |
-| ----------------------------------------------------- | -------------------------------------------------------------------- |
-| Text, rich text                                       | `m.text`, @mentions as pills, Zalo quotes as real Matrix replies     |
-| Photo                                                 | `m.image` (JPEG XL photos are converted to JPEG)                     |
-| Sticker                                               | animated WebP `m.sticker` (still PNG for single-frame stickers)      |
-| GIF                                                   | `m.image` `image/gif`                                                |
-| Video / file / voice                                  | `m.video` / `m.file` / `m.audio` voice note                          |
-| Link card                                             | text + `com.beeper.linkpreviews` (title, description, thumbnail)     |
-| Location, call log, system rows (pins, joins, polls…) | readable text or notice                                              |
-| Media whose bytes no longer exist anywhere            | a text line, e.g. `📷 [Ảnh 1920×1080 — không còn trên máy chủ Zalo]` |
+| Zalo message                                | In Beeper                                                            |
+| ------------------------------------------- | -------------------------------------------------------------------- |
+| Text, rich text                             | `m.text`, @mentions as pills, Zalo quotes as real Matrix replies     |
+| Photo                                       | `m.image` (JPEG XL photos are converted to JPEG)                     |
+| Sticker                                     | animated WebP `m.sticker` (still PNG for single-frame stickers)      |
+| GIF                                         | `m.image` `image/gif`                                                |
+| Video / file / voice                        | `m.video` / `m.file` / `m.audio` voice note                          |
+| Link card                                   | text + `com.beeper.linkpreviews` (title, description, thumbnail)     |
+| Call log                                    | Beeper call tile (`com.beeper.action_message`)                       |
+| Location, system rows (pins, joins, polls…) | readable text or notice                                              |
+| Media whose bytes no longer exist anywhere  | a text line, e.g. `📷 [Ảnh 1920×1080 — không còn trên máy chủ Zalo]` |
 
 ## Where media comes from
 

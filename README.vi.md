@@ -36,28 +36,29 @@ Tài liệu là một trang [VitePress](https://vitepress.dev/): chạy `npm run
 
 ## Tính năng
 
-| Hạng mục                            |                    Zalo → Beeper                    |                 Beeper → Zalo                 |
-| ----------------------------------- | :-------------------------------------------------: | :-------------------------------------------: |
-| Văn bản (chat riêng + nhóm)         |                ✅ (kể cả rich text)                 |                      ✅                       |
-| @nhắc tên                           |                   ✅ (dạng pill)                    |                      ✅                       |
-| Trả lời / trích dẫn                 |                         ✅                          |                      ✅                       |
-| Ảnh                                 |                         ✅                          |                      ✅                       |
-| Sticker                             | ✅ động (`m.sticker`, WebP dựng từ sprite của Zalo) |                       —                       |
-| GIF                                 |                         ✅                          |                       —                       |
-| Video                               |                   ✅ (`m.video`)                    |                      ✅                       |
-| File                                |                    ✅ (`m.file`)                    |                      ✅                       |
-| Tin nhắn thoại                      |           ✅ (`m.audio` dạng voice note)            | ✅ voice note (ogg/opus được chuyển sang AAC) |
-| Thẻ liên kết                        |          ✅ văn bản + link preview Beeper           |      ✅ Zalo tự tạo thẻ liên kết của nó       |
-| Vị trí                              |  ✅ `m.location` (xem trước bản đồ, mở app bản đồ)  |                       —                       |
-| Danh thiếp                          |   ✅ mã QR + tên, số điện thoại và link `zalo.me`   |                       —                       |
-| Thẻ web (`chat.webcontent`)         |            ✅ văn bản (tiêu đề + mô tả)             |                       —                       |
-| Biểu cảm (reaction)                 |                         ✅                          |                      ✅                       |
-| Thu hồi tin nhắn                    |              ✅ xoá luôn trong Beeper               |                      ✅                       |
-| "Xoá ở phía tôi" trên thiết bị khác |             ✅ cũng bị xoá trong Beeper             |                       —                       |
-| Đã xem (read receipt)               |                         ✅                          |   ✅ (theo cài đặt read receipt của Beeper)   |
-| Đang soạn tin (typing)              |                         ✅                          |      ✅ (theo cài đặt typing của Beeper)      |
-| Tin bạn gửi từ điện thoại           |                ✅ (double-puppeting)                |                      n/a                      |
-| Chat Zalo mã hoá đầu cuối           |       chỉ hiện thông báo (không giải mã được)       |                       —                       |
+| Hạng mục                              |                    Zalo → Beeper                    |                 Beeper → Zalo                 |
+| ------------------------------------- | :-------------------------------------------------: | :-------------------------------------------: |
+| Văn bản (chat riêng + nhóm)           |                ✅ (kể cả rich text)                 |                      ✅                       |
+| @nhắc tên                             |                   ✅ (dạng pill)                    |                      ✅                       |
+| Trả lời / trích dẫn                   |                         ✅                          |                      ✅                       |
+| Ảnh                                   |                         ✅                          |                      ✅                       |
+| Sticker                               | ✅ động (`m.sticker`, WebP dựng từ sprite của Zalo) |                       —                       |
+| GIF                                   |                         ✅                          |                       —                       |
+| Video                                 |                   ✅ (`m.video`)                    |                      ✅                       |
+| File                                  |                    ✅ (`m.file`)                    |                      ✅                       |
+| Tin nhắn thoại                        |           ✅ (`m.audio` dạng voice note)            | ✅ voice note (ogg/opus được chuyển sang AAC) |
+| Thẻ liên kết                          |          ✅ văn bản + link preview Beeper           |      ✅ Zalo tự tạo thẻ liên kết của nó       |
+| Vị trí                                |  ✅ `m.location` (xem trước bản đồ, mở app bản đồ)  |                       —                       |
+| Danh thiếp                            |   ✅ mã QR + tên, số điện thoại và link `zalo.me`   |                       —                       |
+| Thẻ web (`chat.webcontent`)           |            ✅ văn bản (tiêu đề + mô tả)             |                       —                       |
+| Nhật ký cuộc gọi (thoại / video, nhỡ) |              ✅ ô cuộc gọi của Beeper               |                       —                       |
+| Biểu cảm (reaction)                   |                         ✅                          |                      ✅                       |
+| Thu hồi tin nhắn                      |              ✅ xoá luôn trong Beeper               |                      ✅                       |
+| "Xoá ở phía tôi" trên thiết bị khác   |             ✅ cũng bị xoá trong Beeper             |                       —                       |
+| Đã xem (read receipt)                 |                         ✅                          |   ✅ (theo cài đặt read receipt của Beeper)   |
+| Đang soạn tin (typing)                |                         ✅                          |      ✅ (theo cài đặt typing của Beeper)      |
+| Tin bạn gửi từ điện thoại             |                ✅ (double-puppeting)                |                      n/a                      |
+| Chat Zalo mã hoá đầu cuối             |       chỉ hiện thông báo (không giải mã được)       |                       —                       |
 
 Ngoài ra bridge còn:
 

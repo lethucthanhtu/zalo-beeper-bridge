@@ -17,6 +17,7 @@
 | Locations                          | ✅ `m.location` (map preview, opens the device's maps app) |                     —                      |
 | Contact cards (danh thiếp)         |       ✅ QR code + name, phone and a `zalo.me` link        |                     —                      |
 | Web cards (`chat.webcontent`)      |               ✅ text (title + description)                |                     —                      |
+| Call logs (voice / video, missed)  |     ✅ Beeper call tile (`com.beeper.action_message`)      |                     —                      |
 | Reactions                          |                             ✅                             |                     ✅                     |
 | Message recall                     |                  ✅ removed in Beeper too                  |                     ✅                     |
 | Deleted "for me" on another device |                  ✅ removed in Beeper too                  |                     —                      |
@@ -63,6 +64,12 @@ They are sent to Zalo exactly when Beeper sends them. If you turn off typing not
 ### Contact cards
 
 A Zalo contact card shows the contact's QR code with name and phone. The `zalo.me/<phone>` link opens the Zalo app on a phone. When the contact hides the number there is no link; scan the QR code instead.
+
+### Call logs
+
+Zalo voice, video and missed calls show as Beeper call tiles, with the direction and duration as the text ("Cuộc gọi video đến · 1:05"). Calls cannot be made or answered from Beeper.
+
+On Beeper mobile, tapping a call tile shows "Couldn't open Self-hosted" instead of opening Zalo. The Beeper app chooses which app to open from the bridge type, and it only knows the official networks. The bridge cannot change this: tests with `external_url` (`https://zalo.me`, `zalo://`) on the event did not help. Open Zalo yourself to call back.
 
 ### Recall
 
