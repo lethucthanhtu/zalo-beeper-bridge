@@ -51,6 +51,7 @@ The docs are a [VitePress](https://vitepress.dev/) site: `npm run docs:dev` prev
 | Locations                          | ✅ `m.location` (map preview, opens the device's maps app) |                     —                      |
 | Contact cards (danh thiếp)         |       ✅ QR code + name, phone and a `zalo.me` link        |                     —                      |
 | Web cards (`chat.webcontent`)      |               ✅ text (title + description)                |                     —                      |
+| Call logs (voice / video, missed)  |                    ✅ Beeper call tile                     |                     —                      |
 | Reactions                          |                             ✅                             |                     ✅                     |
 | Message recall                     |                  ✅ removed in Beeper too                  |                     ✅                     |
 | Deleted "for me" on another device |                  ✅ removed in Beeper too                  |                     —                      |
