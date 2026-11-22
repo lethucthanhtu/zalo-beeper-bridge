@@ -4,8 +4,12 @@
 // (no Matrix client renders JXL) and writes <outDir>/<msgId>.<ext> plus
 // <outDir>/media-index.json = { msgId: { file, mimetype, size, w?, h?, name? } }.
 //
-// Usage: node scripts/zalo-pc/backup-media.mjs <ZaloDownloads dir> <ownerUid> <outDir>
-//   <ZaloDownloads dir> = <extractDir>/<ownerUid>/ZaloDownloads (holds database/ and resource/)
+// Usage: node scripts/zalo-pc/backup-media.mjs <ZaloDownloads dir> <ownerUid> <outDir> [messages]
+//   <ZaloDownloads dir> = <extractDir>/<ownerUid>/ZaloDownloads (holds database/ and resource/),
+//     or the live Zalo PC folder <Zalo Data>/media/<ownerUid>/ZaloDownloads (no database/)
+//   [messages] = an export .ndjson file, or a folder of them (export-cdp.mjs output). Its rows
+//     map files to messages instead of / in addition to database/<ownerUid>_zmessage.zdb, which
+//     the live folder does not have.
 // Needs the dev dependencies @jsquash/jxl + @jsquash/jpeg (npm install, not --omit=dev).
 //
 // File naming in the backup (verified against all 1,487 files of a real backup):
@@ -19,8 +23,8 @@ import { createRequire } from 'node:module';
 import decodeJxl, { init as initJxl } from '@jsquash/jxl/decode.js';
 import encodeJpeg, { init as initJpeg } from '@jsquash/jpeg/encode.js';
 
-const [downloadsDir, ownerUid, outDir] = process.argv.slice(2);
-if (!outDir) throw new Error('usage: node backup-media.mjs <ZaloDownloads dir> <ownerUid> <outDir>');
+const [downloadsDir, ownerUid, outDir, messagesSource] = process.argv.slice(2);
+if (!outDir) throw new Error('usage: node backup-media.mjs <ZaloDownloads dir> <ownerUid> <outDir> [messages]');
 const require = createRequire(import.meta.url);
 /** Compiles a codec .wasm shipped inside node_modules (the jsquash codecs need it passed to init()). */
 const compileWasm = (moduleSpecifier) => WebAssembly.compile(fs.readFileSync(require.resolve(moduleSpecifier)));
@@ -97,14 +101,34 @@ const convOf = (message) =>
 /** Sender uid of a row, with the owner's "0" replaced by the real owner uid (as used in backup file names). */
 const senderOf = (message) => (message.fromUid === '0' ? ownerUid : message.fromUid);
 
-// Media messages, indexed the two ways backup file names refer to them
+// Message sources (NDJSON, one row per line): the backup's message database and/or export files
 const messageDbPath = path.join(downloadsDir, 'database', `${ownerUid}_zmessage.zdb`);
+const messageFiles = fs.existsSync(messageDbPath) ? [messageDbPath] : [];
+if (messagesSource) {
+  messageFiles.push(
+    ...(fs.statSync(messagesSource).isDirectory()
+      ? fs
+          .readdirSync(messagesSource)
+          .filter((name) => name.endsWith('.ndjson'))
+          .map((name) => path.join(messagesSource, name))
+      : [messagesSource]),
+  );
+}
+if (!messageFiles.length)
+  throw new Error(`no message rows: ${messageDbPath} is missing; pass export .ndjson files as the 4th argument`);
+
+// Media messages, indexed the two ways backup file names refer to them; a message seen in
+// several sources is indexed once
 const mediaByCliMsgId = new Map();
 const mediaByChecksum = new Map();
-for (const line of fs.readFileSync(messageDbPath, 'utf8').split('\n')) {
+const seenMsgIds = new Set();
+const lines = messageFiles.flatMap((file) => fs.readFileSync(file, 'utf8').split('\n'));
+for (const line of lines) {
   if (!line.trim()) continue;
   const message = JSON.parse(line);
-  if (!MEDIA_TYPES.has(message.msgType)) continue;
+  if (!MEDIA_TYPES.has(Number(message.msgType)) || seenMsgIds.has(String(message.msgId))) continue;
+  seenMsgIds.add(String(message.msgId));
+  message.msgType = Number(message.msgType);
   (
     mediaByCliMsgId.get(String(message.cliMsgId)) ??
     mediaByCliMsgId.set(String(message.cliMsgId), []).get(String(message.cliMsgId))
@@ -113,16 +137,22 @@ for (const line of fs.readFileSync(messageDbPath, 'utf8').split('\n')) {
   if (checksum) (mediaByChecksum.get(checksum) ?? mediaByChecksum.set(checksum, []).get(checksum)).push(message);
 }
 
+// Conversations that have media messages: resource/<convId> folders of other chats are not walked
+const mediaConversations = new Set([...mediaByCliMsgId.values()].flat().map((message) => String(convOf(message))));
+
 /**
- * Recursively yields every file path below `dir` (depth-first, synchronous reads).
+ * Recursively yields every file path below `dir` (depth-first, synchronous reads),
+ * skipping resource/<convId> folders of conversations without media messages.
  *
  * @param dir - Directory to walk.
  */
 function* walk(dir) {
+  const inResourceRoot = path.relative(downloadsDir, dir) === 'resource';
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const entryPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) yield* walk(entryPath);
-    else yield entryPath;
+    if (entry.isDirectory()) {
+      if (!inResourceRoot || mediaConversations.has(entry.name)) yield* walk(entryPath);
+    } else yield entryPath;
   }
 }
 

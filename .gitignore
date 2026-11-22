@@ -17,6 +17,8 @@ registration.yaml
 
 .DS_Store
 .claude/settings.local.json
+# skills are installed centrally (orca / ~/.claude/skills), never per project
+.claude/skills/
 logs/
 plans/
 
@@ -38,3 +40,6 @@ container-config-*/
 # docs site build output
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+
+# Encryption store + bot device token (encryption.storePath)
+/crypto/

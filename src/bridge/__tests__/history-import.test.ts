@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   dropShadowCopies,
   jxlToJpgUrl,
+  parseReactionSidecar,
   parseThreadKey,
   quoteFallback,
   renderExportRow,
@@ -10,6 +11,46 @@ import {
 } from '../history-import.ts';
 
 const base = { msgId: '100', cliMsgId: '200', sendDttm: '1700000000000' };
+
+describe('parseReactionSidecar', () => {
+  it('flattens each message into one entry per reactor and reaction type', () => {
+    const text = JSON.stringify([
+      { rMsgId: '11', rCli: '22', reactions: { '0': { '5': 1 }, '777': { '3': 2, '0': 1 } } },
+    ]);
+    expect(parseReactionSidecar(text)).toEqual([
+      {
+        msgId: '11',
+        cliMsgId: '22',
+        reactions: [
+          { reactor: '0', rType: '5' },
+          { reactor: '777', rType: '0' },
+          { reactor: '777', rType: '3' },
+        ],
+      },
+    ]);
+  });
+
+  it('treats a "0" id as absent and keeps an entry with only a cliMsgId', () => {
+    const text = JSON.stringify([{ rMsgId: '0', rCli: 22, reactions: { '777': { '5': 1 } } }]);
+    expect(parseReactionSidecar(text)).toEqual([
+      { msgId: '', cliMsgId: '22', reactions: [{ reactor: '777', rType: '5' }] },
+    ]);
+  });
+
+  it('drops entries without any id, without reactions or with zero counts', () => {
+    const text = JSON.stringify([
+      { rMsgId: '0', rCli: '0', reactions: { '777': { '5': 1 } } },
+      { rMsgId: '11', rCli: '22', reactions: {} },
+      { rMsgId: '12', rCli: '23', reactions: { '777': { '5': 0 } } },
+      { rMsgId: '13', rCli: '24' },
+    ]);
+    expect(parseReactionSidecar(text)).toEqual([]);
+  });
+
+  it('rejects a sidecar that is not an array', () => {
+    expect(() => parseReactionSidecar('{}')).toThrow('not an array');
+  });
+});
 
 describe('parseThreadKey', () => {
   it('splits group (g-prefixed) and DM keys', () => {
@@ -25,16 +66,100 @@ describe('renderExportRow', () => {
     expect(event?.content).toEqual({ msgtype: 'm.text', body: 'chào' });
   });
 
+  describe('polls (msgType 26)', () => {
+    const poll = (message: unknown): ExportRow => ({ ...base, fromUid: '789', dName: 'Bob', msgType: 26, message });
+
+    it('renders the question and numbered options as a notice', () => {
+      const event = renderExportRow(
+        poll({ title: 'Lunch?', params: { options: [{ content: 'Pho' }, { content: 'Bun' }] } }),
+        'group',
+        '123',
+      );
+      expect(event?.content).toEqual({ msgtype: 'm.notice', body: '📊 [Bình chọn] Lunch?\n1. Pho\n2. Bun' });
+      expect(event?.sender).toEqual({ kind: 'ghost', uid: '789', name: 'Bob' });
+      expect(event?.rawMsgType).toBe('26');
+    });
+
+    it('reads options given as strings or as a JSON string, and the question from params', () => {
+      const fromStrings = renderExportRow(poll({ options: ['A', 'B'], params: '{"question":"Pick"}' }), 'group', '123');
+      expect(fromStrings?.content.body).toBe('📊 [Bình chọn] Pick\n1. A\n2. B');
+      const fromJson = renderExportRow(poll({ title: 'Q', options: '[{"text":"X"}]' }), 'group', '123');
+      expect(fromJson?.content.body).toBe('📊 [Bình chọn] Q\n1. X');
+    });
+
+    it('still shows the question when no options were exported', () => {
+      expect(renderExportRow(poll({ title: 'Lunch?' }), 'group', '123')?.content.body).toBe('📊 [Bình chọn] Lunch?');
+    });
+
+    it('falls back to a generic label for a row with neither', () => {
+      const event = renderExportRow(poll({}), 'group', '123');
+      expect(event?.content).toEqual({ msgtype: 'm.notice', body: '[Bình chọn]' });
+    });
+  });
+
   it('attributes group messages to the sender ghost with its dName', () => {
     const event = renderExportRow({ ...base, fromUid: '789', dName: 'Bob', msgType: 1, message: 'hi' }, 'group', '123');
     expect(event?.sender).toEqual({ kind: 'ghost', uid: '789', name: 'Bob' });
   });
 
-  it('sends sender-less system rows as the bot in groups and as the peer in DMs', () => {
+  it('sends system rows as the bot in groups and DMs, never as a person', () => {
     const row: ExportRow = { ...base, msgType: -4, message: 'Rabbit đã rời khỏi nhóm', act: 'leave' };
     expect(renderExportRow(row, 'group', '123')?.sender).toEqual({ kind: 'bot' });
-    expect(renderExportRow(row, 'user', '456')?.sender).toEqual({ kind: 'ghost', uid: '456' });
+    expect(renderExportRow(row, 'user', '456')?.sender).toEqual({ kind: 'bot' });
     expect(renderExportRow(row, 'group', '123')?.content.msgtype).toBe('m.notice');
+  });
+
+  it('attributes a pin row to the bot even though it names the pinner as fromUid', () => {
+    const pin: ExportRow = {
+      ...base,
+      fromUid: '789',
+      dName: 'Bob',
+      msgType: -1909,
+      message: { title: 'Bob pinned a message', action: 'pin' },
+    };
+    for (const [type, thread] of [
+      ['group', '123'],
+      ['user', '456'],
+    ] as const) {
+      const event = renderExportRow(pin, type, thread);
+      expect(event?.sender).toEqual({ kind: 'bot' });
+      expect(event?.content.msgtype).toBe('m.notice');
+    }
+  });
+
+  it('still attributes sender-less non-system DM rows to the peer', () => {
+    const row: ExportRow = { ...base, msgType: 1, message: 'hello' };
+    expect(renderExportRow(row, 'user', '456')?.sender).toEqual({ kind: 'ghost', uid: '456' });
+    expect(renderExportRow(row, 'group', '123')?.sender).toEqual({ kind: 'bot' });
+  });
+
+  it('keeps call tiles and recalled-message placeholders with their person', () => {
+    const call = renderExportRow(
+      {
+        ...base,
+        fromUid: '789',
+        msgType: 6,
+        message: { action: 'recommened.calltime', title: 'x', params: '{"duration":10,"isCaller":0,"calltype":0}' },
+      },
+      'group',
+      '123',
+    );
+    expect(call?.sender).toEqual({ kind: 'ghost', uid: '789', name: undefined });
+    const recalled = renderExportRow(
+      { ...base, fromUid: '789', msgType: 20, message: 'Tin nhắn đã bị thu hồi' },
+      'group',
+      '123',
+    );
+    expect(recalled?.sender).toMatchObject({ kind: 'ghost', uid: '789' });
+  });
+
+  it('renders recalled and deleted rows with an object payload as markers, never the payload', () => {
+    const payload = { title: 'removed text', href: 'https://f1.zdn.vn/a.jpg' };
+    const recalled = renderExportRow({ ...base, fromUid: '789', msgType: 20, message: payload }, 'group', '123');
+    expect(recalled?.content).toEqual({ msgtype: 'm.notice', body: '[Tin nhắn đã thu hồi]' });
+    expect(recalled?.media).toBeUndefined();
+    const deleted = renderExportRow({ ...base, fromUid: '789', msgType: -27, message: payload }, 'group', '123');
+    expect(deleted?.content).toEqual({ msgtype: 'm.notice', body: '[Tin nhắn đã xoá]' });
   });
 
   it('describes photos as image media with a text fallback', () => {

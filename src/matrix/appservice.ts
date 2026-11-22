@@ -2,6 +2,7 @@
 // bbctl proxy holds the websocket to Beeper and forwards to our local HTTP port.
 import fs from 'node:fs';
 import { load as loadYaml } from 'js-yaml';
+import type { AppService } from 'matrix-appservice';
 import {
   AppServiceRegistration,
   Bridge,
@@ -25,9 +26,9 @@ export function loadRegistration(registrationPath: string): AppServiceRegistrati
 }
 
 /** Handler for regular (timeline/state) Matrix events routed from the appservice. */
-export type MatrixEventHandler = (event: WeakEvent) => Promise<void> | void;
+type MatrixEventHandler = (event: WeakEvent) => Promise<void> | void;
 /** Handler for ephemeral EDUs. Read receipts and typing arrive via a SEPARATE controller callback, not onEvent */
-export type MatrixEphemeralHandler = (event: EphemeralEvent) => Promise<void> | void;
+type MatrixEphemeralHandler = (event: EphemeralEvent) => Promise<void> | void;
 
 /**
  * Builds the matrix-appservice-bridge `Bridge` and routes incoming events to the given handlers.
@@ -90,11 +91,12 @@ export function createBridge(
  *
  * @param bridge - The bridge returned by {@link createBridge}.
  * @param config - Bridge config (port, plus the registration path for the log line).
+ * @param appService - Optional prebuilt AppService (the crypto one from `crypto.ts`).
  * @throws If the port cannot be bound or the registration file is unreadable/invalid.
  */
-export async function startBridge(bridge: Bridge, config: BridgeConfig): Promise<void> {
+export async function startBridge(bridge: Bridge, config: BridgeConfig, appService?: AppService): Promise<void> {
   // Loopback only — bbctl proxy is the sole legitimate caller; keep 29350 off the LAN
-  await bridge.run(config.matrix.port, undefined, '127.0.0.1');
+  await bridge.run(config.matrix.port, appService, '127.0.0.1');
   // Hungryserv asks for bridgev2 provisioning capabilities on every proxy connect (bbctl
   // proxy always forwards as PUT). No start-chat/group features: answer "none" instead of 404.
   // Unauthenticated: loopback-only port, static answer.

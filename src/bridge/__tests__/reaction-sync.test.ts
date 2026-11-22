@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { EchoSuppressor } from '../echo-suppressor.ts';
 import { MappingStore } from '../mapping-store.ts';
-import { OutboundHandler, SELF_BRIDGE_MARKER } from '../outbound-handler.ts';
+import { OutboundHandler } from '../outbound-handler.ts';
+import { SELF_BRIDGE_MARKER } from '../self-bridge.ts';
 import { PresenceHandler } from '../presence-handler.ts';
 import type { ZaloReactionEvent } from '../../zalo/types.ts';
 

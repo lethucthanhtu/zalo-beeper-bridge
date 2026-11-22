@@ -3,19 +3,20 @@
 The bridge bot (`@sh-zalobot:beeper.local` for a bridge registered as `sh-zalo`) is how you control the bridge. Start a chat with it in Beeper; it joins as soon as **you** (the configured `owner`) invite it and replies with its command list:
 
 ```
-sh-zalo bridge bot ready. Commands: ping | login | logout | status | sync | accounts
+sh-zalo bridge bot ready. Commands: ping | login | logout | status | sync | accounts | media-failures
 ```
 
 Commands are case-insensitive. Messages from anyone other than the owner are ignored.
 
-| Command                 | What it does                                                          |
-| ----------------------- | --------------------------------------------------------------------- |
-| [`ping`](#ping)         | Health check. Answers `pong!` with the uptime.                        |
-| [`login`](#login)       | Starts a QR login to Zalo.                                            |
-| [`logout`](#logout)     | Logs out of Zalo and deletes the saved session.                       |
-| [`status`](#status)     | Shows uptime, Zalo login state and listener state.                    |
-| [`sync`](#sync)         | Creates rooms for pinned chats and every group and fills empty rooms. |
-| [`accounts`](#accounts) | Lists the Zalo accounts this bridge has logged in to. Read-only.      |
+| Command                             | What it does                                                               |
+| ----------------------------------- | -------------------------------------------------------------------------- |
+| [`ping`](#ping)                     | Health check. Answers `pong!` with the uptime.                             |
+| [`login`](#login)                   | Starts a QR login to Zalo.                                                 |
+| [`logout`](#logout)                 | Logs out of Zalo and deletes the saved session.                            |
+| [`status`](#status)                 | Shows uptime, Zalo login state and listener state.                         |
+| [`sync`](#sync)                     | Creates rooms for pinned chats and every group and fills empty rooms.      |
+| [`accounts`](#accounts)             | Lists the Zalo accounts this bridge has logged in to. Read-only.           |
+| [`media-failures`](#media-failures) | Lists rooms with photos or files that arrived only as a notice. Read-only. |
 
 ## `ping`
 
@@ -73,3 +74,19 @@ Zalo accounts:
 ```
 
 It is read-only. One bridge serves one Zalo account at a time; see [Multiple accounts](./multiple-accounts).
+
+## `media-failures`
+
+When the bridge cannot download a photo or file, even after trying the photo's HD and thumbnail links and retrying network errors once, it posts `[Zalo photo could not be bridged: …]` in the room and records the message. This command lists the rooms that still have such notices:
+
+```
+Media that reached Matrix only as a notice (3 in 2 room(s)):
+• Family — 2 photo, last 2026-11-20 09:14 UTC (thread 1234567890)
+• Work — 1 file, last 2026-11-21 16:02 UTC (thread 9876543210)
+1 of them are still being retried automatically (up to about an hour).
+To repair the rest: rebuild the chat with the history importer and --media-dir ...
+```
+
+The bridge first retries each failure on its own, 2, 15 and 60 minutes after it happened (the later tries fetch the message from Zalo again for fresh links). A repaired file is posted at the end of the room's timeline and the notice is removed. After a restart, failures from the last 7 days are retried again. Zalo only serves a group's newest 200 messages and about a week of a DM, so older failures stay on the list.
+
+To repair a room by hand, rebuild it with the [history importer](../history-import/manual) and `--media-dir` pointing at the Zalo PC media folder: the rebuild replaces each notice with the real file. A room leaves the list once it is rebuilt or deleted. It is read-only.

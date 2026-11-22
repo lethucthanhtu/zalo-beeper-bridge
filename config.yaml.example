@@ -26,6 +26,19 @@ bridge:
   # Inbound media size cap in bytes (default 10MB)
   mediaMaxBytes: 10485760
 
+encryption:
+  # End-to-bridge encryption: the bridge bot gets its own Matrix crypto device, new portals
+  # are created encrypted and the bot encrypts and decrypts in them. The importer uses its own
+  # device at <storePath>-import.
+  enabled: false
+  # Rust crypto store + the bot's device file (contains an access token; mode 600)
+  storePath: crypto
+  # Turn encryption on in existing plain portals at start-up: new messages are encrypted, older
+  # history stays plain in the same room. Set to false to keep them plain and move them with the
+  # history importer instead (--rebuild, full history in a new encrypted room), see
+  # docs/history-import/importer-cli.md.
+  upgradeExisting: true
+
 network:
   # Display name + logo shown in Beeper (the internal id stays the bbctl name, e.g. sh-zalo)
   name: Zalo

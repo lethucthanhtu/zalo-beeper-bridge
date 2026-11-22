@@ -196,6 +196,17 @@ function esds(frame: AdtsFrame, avgBitrate: number, maxFrameBytes: number): Buff
 }
 
 /**
+ * Length of a raw ADTS AAC stream.
+ *
+ * @returns milliseconds, or null when the input is not clean ADTS
+ */
+export function adtsDurationMs(adts: Buffer): number | null {
+  const frames = parseAdts(adts);
+  if (!frames) return null;
+  return Math.round(((frames.length * SAMPLES_PER_FRAME) / SAMPLE_RATES[frames[0]!.sampleRateIndex]!) * 1000);
+}
+
+/**
  * Repackages a raw ADTS AAC stream into an M4A file without re-encoding.
  *
  * @param adts the raw ADTS stream (e.g. a Zalo voice note)

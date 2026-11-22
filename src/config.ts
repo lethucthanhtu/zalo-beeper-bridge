@@ -43,6 +43,17 @@ const configSchema = z.object({
       networkId: z.string().min(1).default('zalo'),
     })
     .default({ name: 'Zalo', logoPath: 'assets/zalo-logo.png', networkId: 'zalo' }),
+  // End-to-bridge encryption (experimental, off by default). When on, the bridge bot gets its
+  // own crypto device; the Rust crypto store and the device file live in `storePath`.
+  // `upgradeExisting` turns encryption on in existing plaintext portals at start-up (new
+  // messages are encrypted, older history stays plaintext in the same room).
+  encryption: z
+    .object({
+      enabled: z.boolean().default(false),
+      storePath: z.string().min(1).default('crypto'),
+      upgradeExisting: z.boolean().default(true),
+    })
+    .default({ enabled: false, storePath: 'crypto', upgradeExisting: true }),
   logging: z
     .object({
       level: z.enum(['debug', 'info', 'warn', 'error']).default('warn'),

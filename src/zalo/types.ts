@@ -1,6 +1,6 @@
 // Normalized Zalo event model — the only shapes the bridge layer sees.
 // Derived from live fixtures captured in Phase 1 (plans/.../reports/phase-01-spike-findings.md).
-import type { LinkPreview, MediaDescriptor } from '../bridge/media-content.ts';
+import type { LinkPreview, MediaDescriptor } from '../media-descriptor.ts';
 import type { BeeperActionMessage } from './call-message.ts';
 
 export type ZaloThreadType = 'user' | 'group';
@@ -11,7 +11,16 @@ export type ZaloContent =
   | { kind: 'notice'; text: string }
   /** call log bubble: posted as m.text + com.beeper.action_message (Beeper call tile) */
   | { kind: 'call'; text: string; action: BeeperActionMessage }
-  | { kind: 'photo'; url: string; thumbUrl?: string; width?: number; height?: number; caption?: string }
+  /** `fallbackUrls`: other copies of the photo (HD, thumbnail), tried when `url` fails */
+  | {
+      kind: 'photo';
+      url: string;
+      thumbUrl?: string;
+      fallbackUrls?: string[];
+      width?: number;
+      height?: number;
+      caption?: string;
+    }
   /** shared location → m.location; `text` is the fallback body (label, address, maps link) */
   | { kind: 'location'; latitude: number; longitude: number; label: string; text: string }
   | { kind: 'sticker'; id: number; catId: number }
@@ -83,6 +92,61 @@ export type ZaloQuotePayload = {
   cliMsgId: string;
   ts: string;
   ttl: number;
+};
+
+/** A message was pinned or unpinned (group_event topics, DM friend_event pins). */
+export type ZaloPinEvent = {
+  threadId: string;
+  threadType: ZaloThreadType;
+  action: 'pin' | 'unpin';
+  /** who pinned / unpinned (uid); the account's own uid when isSelf */
+  actorId?: string;
+  /** true when the bridged account itself pinned / unpinned */
+  isSelf: boolean;
+  /** global msgId of the pinned message (absent on a DM unpin, which only carries the topic id) */
+  msgId?: string;
+  /** Zalo's pin (topic) id */
+  topicId?: string;
+};
+
+/** A group poll was created, voted on, locked (update) or deleted (remove) — group_event board topics. */
+export type ZaloPollEvent = {
+  threadId: string;
+  action: 'update' | 'remove';
+  /** who acted (uid, from sourceId); the account's own uid when isSelf */
+  actorId?: string;
+  /** who created the poll */
+  creatorId?: string;
+  /** true when the bridged account itself acted */
+  isSelf: boolean;
+  pollId: number;
+  title?: string;
+};
+
+type ZaloPollOption = {
+  optionId: number;
+  content: string;
+  votes: number;
+  /** uids that picked this option; empty for an anonymous poll */
+  voters: string[];
+};
+
+/** Normalized getPollDetail / createPoll result. */
+export type ZaloPoll = {
+  pollId: number;
+  question: string;
+  creatorId?: string;
+  options: ZaloPollOption[];
+  closed: boolean;
+  multiChoice: boolean;
+  anonymous: boolean;
+};
+
+/** Poll settings the account can choose when creating a poll. */
+export type ZaloPollCreate = {
+  question: string;
+  options: string[];
+  multiChoice: boolean;
 };
 
 /** Read-receipt event: someone saw messages in a thread. */

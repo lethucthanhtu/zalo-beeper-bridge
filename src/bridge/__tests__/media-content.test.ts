@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
-import { adtsToM4a, isAdts } from '../audio-remux.ts';
-import { buildLinkPreview, buildMediaEvent, toMatrixWaveform } from '../media-content.ts';
-import { assertZaloMediaUrl, fetchMediaCapped, sniffMimetype } from '../media-handler.ts';
+import { adtsDurationMs, adtsToM4a, isAdts } from '../audio-remux.ts';
+import { decryptAttachment } from '../../matrix/crypto.ts';
+import {
+  buildLinkPreview,
+  buildMediaEvent,
+  downloadFirstMedia,
+  isTransientMediaError,
+  MediaDownloadError,
+  roomUploader,
+} from '../media-content.ts';
+import { toMatrixWaveform } from '../../media-descriptor.ts';
+import { assertZaloMediaUrl, fetchMediaCapped, MediaHttpError, sniffMimetype } from '../media-fetch.ts';
 import { aacVoiceFilename } from '../outbound-handler.ts';
 
 /** Buffer starting with the given signature bytes, zero-padded by 16 bytes so offset reads stay in range. */
@@ -28,7 +37,7 @@ describe('sniffMimetype', () => {
 });
 
 describe('buildMediaEvent', () => {
-  const upload = vi.fn(async () => 'mxc://x/y');
+  const upload = vi.fn(async () => ({ url: 'mxc://x/y' }));
 
   it('marks voice notes as MSC3245 voice with an audio type and a name matching it', async () => {
     const { type, content } = await buildMediaEvent(
@@ -97,6 +106,8 @@ describe('adtsToM4a', () => {
   it('remuxes ADTS frames into a fast-start M4A with one sample per frame', () => {
     const result = adtsToM4a(adtsStream(235, 44100));
     expect(result).not.toBeNull();
+    expect(adtsDurationMs(adtsStream(235, 44100))).toBe(5457);
+    expect(adtsDurationMs(Buffer.from('not audio at all'))).toBeNull();
     expect(result!.durationMs).toBe(5457); // 235 × 1024 samples at 44.1 kHz, like a real Zalo voice note
     expect(topLevelBoxes(result!.m4a)).toEqual(['ftyp', 'moov', 'mdat']);
     expect(result!.m4a.toString('latin1', 8, 12)).toBe('M4A ');
@@ -128,7 +139,7 @@ describe('toMatrixWaveform', () => {
 });
 
 describe('buildMediaEvent (stickers and files)', () => {
-  const upload = vi.fn(async () => 'mxc://x/y');
+  const upload = vi.fn(async () => ({ url: 'mxc://x/y' }));
 
   it('builds stickers, files with names and reuses a cached mxc', async () => {
     upload.mockClear();
@@ -136,7 +147,7 @@ describe('buildMediaEvent (stickers and files)', () => {
       upload,
       { kind: 'sticker', urls: [], stickerId: 1 },
       { buffer: Buffer.alloc(4), mimetype: 'image/webp', width: 130, height: 130 },
-      { mxcUrl: 'mxc://x/cached' },
+      { uploaded: { url: 'mxc://x/cached' } },
     );
     expect(upload).not.toHaveBeenCalled();
     expect(sticker).toMatchObject({
@@ -149,6 +160,62 @@ describe('buildMediaEvent (stickers and files)', () => {
       { buffer: Buffer.alloc(3), mimetype: 'application/pdf' },
     );
     expect(file.content).toMatchObject({ msgtype: 'm.file', body: 'a.pdf', filename: 'a.pdf', url: 'mxc://x/y' });
+  });
+});
+
+describe('roomUploader', () => {
+  it('uploads plain rooms as they are and returns the url', async () => {
+    const raw = vi.fn(async () => 'mxc://x/plain');
+    const uploaded = await roomUploader(raw, false)(Buffer.from('abc'), { type: 'image/png', name: 'a.png' });
+    expect(uploaded).toEqual({ url: 'mxc://x/plain' });
+    expect(raw).toHaveBeenCalledWith(Buffer.from('abc'), { type: 'image/png', name: 'a.png' });
+  });
+
+  it('uploads ciphertext as an opaque blob for encrypted rooms and returns the key as file', async () => {
+    const raw = vi.fn(async (_buffer: Buffer, _options: { type: string; name?: string }) => 'mxc://x/enc');
+    const plain = Buffer.from('secret picture bytes');
+    const uploaded = await roomUploader(raw, true)(plain, { type: 'image/png', name: 'a.png' });
+    expect(raw).toHaveBeenCalledTimes(1);
+    const [sent, options] = raw.mock.calls[0]!;
+    expect(options).toEqual({ type: 'application/octet-stream' });
+    expect(sent.equals(plain)).toBe(false);
+    if (!('file' in uploaded)) throw new Error('expected an encrypted upload');
+    expect(uploaded.file).toMatchObject({ url: 'mxc://x/enc', v: 'v2' });
+    expect(decryptAttachment(sent, uploaded.file).equals(plain)).toBe(true);
+  });
+});
+
+describe('buildMediaEvent in an encrypted room', () => {
+  const file = { url: 'mxc://x/enc', v: 'v2' } as never;
+  const upload = vi.fn(async () => ({ file }));
+
+  it('puts the key in content.file and leaves content.url out, for media and stickers', async () => {
+    const image = await buildMediaEvent(
+      upload,
+      { kind: 'image', urls: [] },
+      { buffer: Buffer.alloc(4), mimetype: 'image/png', width: 2, height: 3 },
+    );
+    expect(image.content).toMatchObject({ msgtype: 'm.image', file, info: { mimetype: 'image/png', w: 2, h: 3 } });
+    expect(image.content).not.toHaveProperty('url');
+    expect(image.uploaded).toEqual({ file });
+
+    const sticker = await buildMediaEvent(
+      upload,
+      { kind: 'sticker', urls: [], stickerId: 1 },
+      { buffer: Buffer.alloc(4), mimetype: 'image/webp' },
+    );
+    expect(sticker.content).toMatchObject({ body: 'sticker', file });
+    expect(sticker.content).not.toHaveProperty('url');
+  });
+
+  it('encrypts the M4A of a voice note, not the raw ADTS stream', async () => {
+    upload.mockClear();
+    await buildMediaEvent(
+      upload,
+      { kind: 'audio', urls: [], filename: 'Voice message.m4a' },
+      { buffer: adtsStream(10, 44100), mimetype: 'image/jpeg' },
+    );
+    expect(upload).toHaveBeenCalledWith(expect.any(Buffer), { type: 'audio/mp4', name: 'Voice message.m4a' });
   });
 });
 
@@ -165,6 +232,30 @@ describe('buildLinkPreview', () => {
       'og:title': 'Trang A',
       'og:description': 'tóm tắt',
     });
+  });
+});
+
+describe('buildLinkPreview thumbnails', () => {
+  const png = new Response(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]), {
+    headers: { 'content-type': 'image/png' },
+  });
+  const preview = { url: 'https://a.vn/x', title: 'A', imageUrl: 'https://f1.zdn.vn/t.png' };
+
+  it('sets og:image for a plain upload', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(png.clone());
+    const entry = await buildLinkPreview(async () => ({ url: 'mxc://x/t' }), preview, 1000);
+    fetchMock.mockRestore();
+    expect(entry).toMatchObject({ 'og:image': 'mxc://x/t', 'og:image:type': 'image/png', 'matrix:image:size': 12 });
+    expect(entry).not.toHaveProperty('beeper:image:encryption');
+  });
+
+  it('uses beeper:image:encryption and no og:image for an encrypted upload, like mautrix', async () => {
+    const file = { url: 'mxc://x/t', v: 'v2' } as never;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(png.clone());
+    const entry = await buildLinkPreview(async () => ({ file }), preview, 1000);
+    fetchMock.mockRestore();
+    expect(entry).toMatchObject({ 'beeper:image:encryption': file, 'og:image:type': 'image/png' });
+    expect(entry).not.toHaveProperty('og:image');
   });
 });
 
@@ -225,5 +316,69 @@ describe('media URL guard', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     fetchMock.mockRestore();
     expect(() => assertZaloMediaUrl('https://video-stal-15-te-vnso-cm-15.mdchat.me/gr/a/b')).not.toThrow();
+  });
+});
+
+describe('isTransientMediaError', () => {
+  it('retries server hiccups and dropped connections, not expired links', () => {
+    expect(isTransientMediaError(new MediaHttpError(503))).toBe(true);
+    expect(isTransientMediaError(new MediaHttpError(429))).toBe(true);
+    expect(isTransientMediaError(new MediaHttpError(400))).toBe(false);
+    expect(isTransientMediaError(new MediaHttpError(404))).toBe(false);
+    expect(isTransientMediaError(new TypeError('fetch failed'))).toBe(true);
+    expect(isTransientMediaError(Object.assign(new Error('timed out'), { name: 'TimeoutError' }))).toBe(true);
+    expect(isTransientMediaError(Object.assign(new Error('socket'), { cause: { code: 'ECONNRESET' } }))).toBe(true);
+    expect(isTransientMediaError(new Error('media download returned an error page'))).toBe(false);
+    expect(isTransientMediaError('nope')).toBe(false);
+  });
+});
+
+describe('downloadFirstMedia', () => {
+  const jpeg = () => new Response(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), { headers: { 'content-type': 'image/jpeg' } });
+  const status = (code: number) => new Response(null, { status: code });
+  const quiet = () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  };
+
+  it('falls back to the next candidate when the first link has expired (4xx, no retry)', async () => {
+    quiet();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(status(400)).mockResolvedValueOnce(jpeg());
+    const media = await downloadFirstMedia(['https://f1.zdn.vn/href.jpg', 'https://f1.zdn.vn/hd.jpg'], 1000, {
+      retryDelayMs: 0,
+    });
+    expect(media.mimetype).toBe('image/jpeg');
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      'https://f1.zdn.vn/href.jpg',
+      'https://f1.zdn.vn/hd.jpg',
+    ]);
+    vi.restoreAllMocks();
+  });
+
+  it('retries a transient failure once on the same URL', async () => {
+    quiet();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(status(503)).mockResolvedValueOnce(jpeg());
+    await downloadFirstMedia(['https://f1.zdn.vn/a.jpg', 'https://f1.zdn.vn/b.jpg'], 1000, { retryDelayMs: 0 });
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual(['https://f1.zdn.vn/a.jpg', 'https://f1.zdn.vn/a.jpg']);
+    vi.restoreAllMocks();
+  });
+
+  it('throws MediaDownloadError naming hosts only (no signed path) when every candidate fails', async () => {
+    quiet();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => status(403));
+    const error = await downloadFirstMedia(['https://f1.zdn.vn/secret-token.jpg', 'https://f2.zadn.vn/x.jpg'], 1000, {
+      retryDelayMs: 0,
+    }).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MediaDownloadError);
+    expect((error as MediaDownloadError).failures).toEqual([
+      'f1.zdn.vn: media download failed: HTTP 403',
+      'f2.zadn.vn: media download failed: HTTP 403',
+    ]);
+    expect((error as Error).message).not.toContain('secret-token');
+    vi.restoreAllMocks();
+  });
+
+  it('fails clearly when there is no candidate URL', async () => {
+    await expect(downloadFirstMedia([], 1000)).rejects.toBeInstanceOf(MediaDownloadError);
   });
 });

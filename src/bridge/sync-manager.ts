@@ -9,6 +9,7 @@ import type { PortalManager } from './portal-manager.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
 import type { ZaloMessage, ZaloThreadType } from '../zalo/types.ts';
 import { errorMessage } from '../error-message.ts';
+import { sleep } from '../util.ts';
 
 /** Pause before every Zalo API call of the sync. */
 const PACE_MS = 1_500;
@@ -22,7 +23,6 @@ const HISTORY_PAGES = 10;
 const CATCH_UP_PAGES = 10;
 
 /** Resolves after `ms` milliseconds. */
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * getPinConversations returns prefixed ids — "u<uid>" for DMs, "g<groupId>" for

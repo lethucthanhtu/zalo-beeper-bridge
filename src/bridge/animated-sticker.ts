@@ -14,6 +14,7 @@ import { inflateSync } from 'node:zlib';
 // emscripten factory directly (the same thing the package's wrapper calls)
 // @ts-expect-error -- untyped emscripten module
 import WebpWasm from 'wasm-webp/dist/esm/webp-wasm.js';
+import { readCapped, ZALO_EMOTICON_API } from './media-fetch.ts';
 
 /** One frame handed to wasm-webp's animation encoder (RGBA pixels + display time). */
 type WebpFrame = {
@@ -30,7 +31,7 @@ type WebpModule = {
 };
 
 /** An encoded animated sticker, ready to upload as an m.sticker. */
-export type StickerImage = {
+type StickerImage = {
   buffer: Buffer;
   mimetype: string;
   width: number;
@@ -39,8 +40,12 @@ export type StickerImage = {
 };
 
 /** Public sprite strip of a sticker (all frames side by side, 130 px high). */
-const SPRITE_URL = (id: number) => `https://zalo-api.zadn.vn/api/emoticon/sprite?eid=${id}&size=130`;
+const SPRITE_URL = (id: number) => `${ZALO_EMOTICON_API}/sprite?eid=${id}&size=130`;
 const FETCH_TIMEOUT_MS = 15_000;
+// Real sprites are a few hundred KB (130 px high, at most a few dozen frames); the caps stop a
+// bad CDN answer from exhausting memory, both on the wire and after inflating the PNG.
+const SPRITE_MAX_BYTES = 5 * 1024 * 1024;
+const SPRITE_MAX_PIXELS = 16 * 1024 * 1024;
 
 /** The wasm encoder, instantiated lazily on the first animated sticker. */
 let webpModulePromise: Promise<WebpModule> | null = null;
@@ -111,7 +116,9 @@ export function decodePng(pngBytes: Buffer): { width: number; height: number; rg
   if (!channels) throw new Error(`unsupported PNG colour type ${colourType}`);
 
   // Undo the per-row PNG filters (none / sub / up / average / paeth)
-  const filtered = inflateSync(Buffer.concat(imageDataChunks));
+  if (width * height > SPRITE_MAX_PIXELS) throw new Error(`PNG too large (${width}x${height})`);
+  // One filter byte per row plus the pixel bytes: anything beyond that is not image data
+  const filtered = inflateSync(Buffer.concat(imageDataChunks), { maxOutputLength: (width * channels + 1) * height });
   const stride = width * channels;
   const pixels = new Uint8Array(stride * height);
   let previousRow = new Uint8Array(stride);
@@ -195,12 +202,14 @@ async function encodeAnimation(width: number, height: number, frames: WebpFrame[
  * Downloads the public sprite (network), cuts it into square frames of the strip's height
  * and encodes them with the sticker's frame timing.
  *
- * @throws on network/decode errors, or when the WebP encoder fails
+ * @throws on network/decode errors, a sprite over the size caps, or when the WebP encoder fails
  */
 async function build(id: number): Promise<StickerImage | null> {
   const response = await fetch(SPRITE_URL(id), { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  // A missing sprite is an answer (cached as "still sticker"), unlike a failed download
   if (!response.ok) return null;
-  const { width, height, rgba } = decodePng(Buffer.from(await response.arrayBuffer()));
+  const { buffer } = await readCapped(response, SPRITE_MAX_BYTES);
+  const { width, height, rgba } = decodePng(buffer);
   const frames = Math.round(width / height);
   if (frames <= 1 || frames * height !== width) return null;
   const frameMs = frameMsFor(id, frames);

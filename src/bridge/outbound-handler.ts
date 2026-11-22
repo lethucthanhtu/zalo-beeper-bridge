@@ -7,12 +7,20 @@ import { imageSize } from 'image-size';
 import type { Bridge, WeakEvent } from 'matrix-appservice-bridge';
 import { isAdts, transcodeToAac } from './audio-remux.ts';
 import type { EchoSuppressor } from './echo-suppressor.ts';
-import { downloadMatrixMedia } from './media-handler.ts';
+import { downloadMatrixMedia } from './media-fetch.ts';
 import { mentionsFromUserIds, parseOutboundMentions } from './mentions.ts';
 import type { MappingStore, PortalRow, ReactionRow } from './mapping-store.ts';
+import {
+  isPollEventType,
+  parsePollEnd,
+  parsePollResponse,
+  parsePollStart,
+  POLL_END,
+  POLL_RESPONSE,
+} from './poll-content.ts';
 import type { PuppetRegistry } from './puppet-registry.ts';
-import { Reactions } from 'zca-js';
-import { emojiToZalo } from '../zalo/reaction-map.ts';
+import { isOwnEcho, type BridgedEvents } from './self-bridge.ts';
+import { emojiToZalo, REACTION_NONE } from '../zalo/reaction-map.ts';
 import type { LinkPreviewHint, ZaloClient } from '../zalo/zalo-client.ts';
 import { errorMessage } from '../error-message.ts';
 
@@ -20,15 +28,6 @@ import { errorMessage } from '../error-message.ts';
 export function stripReplyFallback(body: string): string {
   return body.replace(/^(?:>.*\n)+\n?/, '');
 }
-
-/**
- * Content marker on messages the bridge double-puppets as the owner (mirroring
- * the owner's own Zalo-app messages into Beeper). The homeserver echoes these
- * events back to the appservice, and the echo can beat the send-response's
- * event_id — so id-based guards race. The marker travels IN the content, so
- * OutboundHandler can drop it deterministically and never loop it back to Zalo.
- */
-export const SELF_BRIDGE_MARKER = 'com.zalo-bridge.self';
 
 /**
  * Beeper's link preview (`com.beeper.linkpreviews`) for the link in `body`: the first entry
@@ -50,19 +49,6 @@ export function linkPreviewHint(
     return { url, title: text(entry['og:title']), description: text(entry['og:description']) };
   }
   return previews.length === 0 ? null : undefined;
-}
-
-/**
- * Adds an event_id to the shared `bridgedEventIds` set, dropping the oldest entries once it
- * outgrows 5000 (insertion order) so a long-running bridge doesn't grow it without bound.
- */
-export function rememberBridgedEvent(bridgedEventIds: Set<string>, eventId: string): void {
-  bridgedEventIds.add(eventId);
-  if (bridgedEventIds.size <= 5000) return;
-  for (const id of bridgedEventIds) {
-    bridgedEventIds.delete(id);
-    if (bridgedEventIds.size <= 4000) break;
-  }
 }
 
 /** File extension per MIME type for outbound attachments (zca-js routes by extension). */
@@ -123,9 +109,11 @@ export type OutboundHandlerDeps = {
   mediaMaxBytes: number;
   homeserverUrl: string;
   matrixToken: string;
+  /** Decrypts an attachment of an encrypted room (`content.file`); unset without encryption. */
+  decryptAttachment?: (data: Buffer, file: unknown) => Buffer;
   /** event_ids the bridge must never send outbound: its own double-puppet posts
    * (shared with InboundHandler) + events already handled here (retry idempotency). */
-  bridgedEventIds: Set<string>;
+  bridgedEventIds: BridgedEvents;
 };
 
 /**
@@ -159,21 +147,12 @@ export class OutboundHandler {
     // Reactions and redactions are owner-only signals against a bridged message
     if (event.type === 'm.reaction') return this.handleReaction(event, portal);
     if (event.type === 'm.room.redaction') return this.handleRedaction(event, portal);
+    if (isPollEventType(event.type)) return this.handlePoll(event, portal);
     if (event.type !== 'm.room.message') return true;
 
-    // Deterministic anti-loop: the bridge marks messages it double-puppets as the
-    // owner (mirroring the owner's Zalo-app messages). Never send those back to Zalo.
-    if ((event.content as Record<string, unknown>)?.[SELF_BRIDGE_MARKER]) return true;
-
-    // Only the owner's own messages bridge outbound; skip bridge-posted echoes
-    if (event.sender !== this.deps.ownerUserId) return true;
-    // Idempotency + anti-loop: skip our own double-puppet posts (phone messages the
-    // bridge mirrored into Beeper) and any transaction retry of an event handled here.
-    // In-memory + synchronous, so it wins races the DB-backed hasEventId check can lose.
-    if (event.event_id) {
-      if (this.deps.bridgedEventIds.has(event.event_id)) return true;
-      rememberBridgedEvent(this.deps.bridgedEventIds, event.event_id);
-    }
+    // Only the owner's own Beeper messages go to Zalo, and only once. The DB check covers
+    // events handled before a restart, which the in-memory set no longer holds.
+    if (isOwnEcho(event, this.deps.ownerUserId, this.deps.bridgedEventIds, true)) return true;
     if (event.event_id && this.deps.store.hasEventId(event.event_id)) return true;
 
     const content = event.content as {
@@ -321,7 +300,13 @@ export class OutboundHandler {
     portal: PortalRow,
     msgtype: string,
     mxcUrl: string,
-    content: { body?: string; filename?: string; info?: { mimetype?: string }; 'org.matrix.msc3245.voice'?: unknown },
+    content: {
+      body?: string;
+      filename?: string;
+      info?: { mimetype?: string };
+      'org.matrix.msc3245.voice'?: unknown;
+      file?: unknown;
+    },
   ): Promise<void> {
     // Guards armed for this send — disarmed again when the send fails, so a real
     // photo / caption sent from the phone within the TTL is not swallowed as an echo
@@ -329,22 +314,31 @@ export class OutboundHandler {
     let captionGuard = '';
     try {
       // Authenticated-media download via fetch (bot-sdk's downloadContent 400s on Beeper's R2 redirect)
-      const { buffer: mediaBytes, mimetype: downloadedMimetype } = await downloadMatrixMedia(
+      const downloaded = await downloadMatrixMedia(
         this.deps.homeserverUrl,
         this.deps.matrixToken,
         mxcUrl,
         this.deps.mediaMaxBytes,
       );
+      let mediaBytes = downloaded.buffer;
+      const downloadedMimetype = downloaded.mimetype;
+      // Encrypted rooms upload ciphertext; the key and hashes travel in content.file
+      if (content.file !== undefined) {
+        if (!this.deps.decryptAttachment) throw new Error('encrypted attachment but encryption is disabled');
+        mediaBytes = this.deps.decryptAttachment(mediaBytes, content.file);
+      }
       const mimetype = content.info?.mimetype ?? downloadedMimetype;
       // A Matrix voice note (MSC3245 marker) goes out as a native Zalo voice message, which
-      // must be AAC: other codecs (Beeper Android records ogg/opus) are re-encoded first, and
-      // only stay a file attachment when that fails (e.g. no ffmpeg outside the container)
+      // Zalo clients only play as a raw ADTS AAC stream (what Zalo itself records). Anything
+      // else — M4A from Beeper iOS, ogg/opus from Beeper Android — is re-encoded first. Without
+      // ffmpeg, M4A still goes as a voice message (may not play) and other codecs as a file.
       const isVoiceNote = msgtype === 'm.audio' && content['org.matrix.msc3245.voice'] !== undefined;
       let voiceBytes = mediaBytes;
-      let voiceFilename = isVoiceNote ? aacVoiceFilename(mimetype, mediaBytes) : null;
-      if (isVoiceNote && !voiceFilename) {
-        const aac = await transcodeToAac(mediaBytes);
+      let voiceFilename: `${string}.${string}` | null = null;
+      if (isVoiceNote) {
+        const aac = isAdts(mediaBytes) ? mediaBytes : await transcodeToAac(mediaBytes);
         if (aac) [voiceBytes, voiceFilename] = [aac, 'voice.aac'];
+        else voiceFilename = aacVoiceFilename(mimetype, mediaBytes);
       }
       // MSC2530 caption: only with a `filename` field that differs from body. Without one
       // (e.g. Beeper iOS photos) body IS the filename, not a caption.
@@ -408,10 +402,9 @@ export class OutboundHandler {
    * @returns Always true (the event belonged to a portal).
    */
   private async handleReaction(event: WeakEvent, portal: PortalRow): Promise<boolean> {
-    if (event.sender !== this.deps.ownerUserId) return true;
+    // Not claimed: the reaction row stored after the Zalo call is what stops a redelivery
+    if (isOwnEcho(event, this.deps.ownerUserId, this.deps.bridgedEventIds, false)) return true;
     const content = event.content as { 'm.relates_to'?: { event_id?: string; key?: string } };
-    if ((content as Record<string, unknown>)[SELF_BRIDGE_MARKER]) return true; // own phone reaction, mirrored in
-    if (event.event_id && this.deps.bridgedEventIds.has(event.event_id)) return true;
     if (event.event_id && this.deps.store.getReactionByEventId(event.event_id)) return true; // transaction retry
     const relation = content['m.relates_to'];
     if (!relation?.event_id || !relation.key) return true;
@@ -453,7 +446,7 @@ export class OutboundHandler {
     const cliMsgId = target?.cliMsgId ?? '0';
     this.deps.echo.expectReactionRemoval(portal.thread_id, msgId);
     try {
-      await this.deps.zalo.react(portal.thread_id, portal.thread_type, msgId, cliMsgId, Reactions.NONE);
+      await this.deps.zalo.react(portal.thread_id, portal.thread_type, msgId, cliMsgId, REACTION_NONE);
     } catch (err) {
       this.deps.echo.cancelReactionRemoval(portal.thread_id, msgId);
       await this.notice(portal.room_id, `⚠ Zalo reaction removal failed: ${errorMessage(err)}`);
@@ -497,6 +490,105 @@ export class OutboundHandler {
       await this.notice(portal.room_id, `⚠ Zalo recall failed: ${errorMessage(err)}`);
     }
     return true;
+  }
+
+  /**
+   * The owner's poll activity in a portal: poll.start creates a Zalo group poll, poll.response
+   * votes (an empty answer list removes the vote), poll.end locks the poll. Skips what the bridge
+   * itself posted (SELF_BRIDGE_MARKER / bridgedEventIds), other senders and redelivered events.
+   * Failures come back as a room notice, after the local state is put back.
+   * @returns Always true (the event belonged to a portal).
+   */
+  private async handlePoll(event: WeakEvent, portal: PortalRow): Promise<boolean> {
+    if (isOwnEcho(event, this.deps.ownerUserId, this.deps.bridgedEventIds, true)) return true;
+    const content = event.content as Record<string, unknown>;
+    if (event.type === POLL_RESPONSE) await this.votePoll(content, portal);
+    else if (event.type === POLL_END) await this.endPoll(content, portal);
+    else await this.createPoll(event, content, portal);
+    return true;
+  }
+
+  /** poll.start → `createPoll`; the poll's Zalo ids are recorded so votes and the end map back. */
+  private async createPoll(event: WeakEvent, content: Record<string, unknown>, portal: PortalRow): Promise<void> {
+    const { store, zalo, echo } = this.deps;
+    if (portal.thread_type !== 'group') {
+      await this.notice(portal.room_id, '⚠ Zalo polls only work in group chats, so this poll was not sent');
+      return;
+    }
+    const start = parsePollStart(content);
+    if (!start) {
+      await this.notice(portal.room_id, '⚠ This poll has no question or answers, so it was not sent to Zalo');
+      return;
+    }
+    const multi = start.maxSelections > 1;
+    // Armed BEFORE the call: Zalo's update_board echo can beat the call's response
+    echo.expectPoll(portal.thread_id);
+    try {
+      const poll = await zalo.createPoll(portal.thread_id, {
+        question: start.question,
+        options: start.answers.map((answer) => answer.text),
+        multiChoice: multi,
+      });
+      if (event.event_id) {
+        store.recordPoll({
+          pollId: poll.pollId,
+          roomId: portal.room_id,
+          eventId: event.event_id,
+          creatorId: zalo.ownId,
+          options: start.answers.flatMap((answer, i) => {
+            const option = poll.options[i];
+            return option ? [{ optionId: option.optionId, answerId: answer.id, content: answer.text }] : [];
+          }),
+          multi,
+        });
+      }
+    } catch (err) {
+      echo.cancelPoll(portal.thread_id);
+      if (event.event_id) this.deps.bridgedEventIds.delete(event.event_id); // a redelivery may retry
+      await this.notice(portal.room_id, `⚠ Failed to deliver the poll to Zalo: ${errorMessage(err)}`);
+    }
+  }
+
+  /** poll.response → `votePoll`. The vote is stored first (Zalo's echo can win the race) and restored on failure. */
+  private async votePoll(content: Record<string, unknown>, portal: PortalRow): Promise<void> {
+    const { store, zalo } = this.deps;
+    const response = parsePollResponse(content);
+    const poll = response && store.getPollByEventId(response.startEventId);
+    if (!response || !poll || poll.closed) return;
+    const optionIds = response.answers.flatMap((id) => {
+      const option = poll.options.find((o) => o.answerId === id);
+      return option ? [option.optionId] : [];
+    });
+    const ownId = zalo.ownId;
+    const saveVote = (votes: number[] | undefined) => {
+      if (!ownId) return;
+      const next = { ...store.getPollById(poll.pollId)!.votes };
+      if (votes?.length) next[ownId] = votes;
+      else delete next[ownId];
+      store.setPollVotes(poll.pollId, next);
+    };
+    const before = ownId ? poll.votes[ownId] : undefined;
+    saveVote(optionIds);
+    try {
+      await zalo.votePoll(poll.pollId, optionIds);
+    } catch (err) {
+      saveVote(before);
+      await this.notice(portal.room_id, `⚠ Failed to deliver the vote to Zalo: ${errorMessage(err)}`);
+    }
+  }
+
+  /** poll.end → `lockPoll`. Marked closed first so Zalo's echo does not post a second poll.end; reopened on failure. */
+  private async endPoll(content: Record<string, unknown>, portal: PortalRow): Promise<void> {
+    const startEventId = parsePollEnd(content);
+    const poll = startEventId && this.deps.store.getPollByEventId(startEventId);
+    if (!poll || poll.closed) return;
+    this.deps.store.closePoll(poll.pollId);
+    try {
+      await this.deps.zalo.lockPoll(poll.pollId);
+    } catch (err) {
+      this.deps.store.closePoll(poll.pollId, false);
+      await this.notice(portal.room_id, `⚠ Failed to end the poll on Zalo: ${errorMessage(err)}`);
+    }
   }
 
   /**

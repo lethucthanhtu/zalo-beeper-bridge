@@ -2,6 +2,8 @@
 // `recommened.misscall`). Their title is the literal "sendBubbleMessage" and they carry
 // no href, so they need their own rendering — shared by the live bridge and the importer.
 
+import { parseParams } from '../util.ts';
+
 /** Card actions Zalo uses for call log bubbles (Zalo's own spelling of "recommended"). */
 export const CALL_ACTIONS = new Set(['recommened.calltime', 'recommened.misscall']);
 
@@ -23,13 +25,7 @@ type CallParams = {
 export type BeeperActionMessage = { type: 'call'; call_type: 'voice' | 'video' };
 
 /** Parses the card `params` (JSON string or object); malformed params yield {}. */
-function parseCallParams(params: unknown): CallParams {
-  try {
-    return ((typeof params === 'string' ? JSON.parse(params) : params) ?? {}) as CallParams;
-  } catch {
-    return {};
-  }
-}
+const parseCallParams = (params: unknown): CallParams => (parseParams(params) ?? {}) as CallParams;
 
 /** The `com.beeper.action_message` payload for a Zalo call bubble (voice unless calltype is 1). */
 export function callActionMessage(params: unknown): BeeperActionMessage {

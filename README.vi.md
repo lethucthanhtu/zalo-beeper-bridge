@@ -52,6 +52,9 @@ Tài liệu là một trang [VitePress](https://vitepress.dev/): chạy `npm run
 | Danh thiếp                            |   ✅ mã QR + tên, số điện thoại và link `zalo.me`   |                       —                       |
 | Thẻ web (`chat.webcontent`)           |            ✅ văn bản (tiêu đề + mô tả)             |                       —                       |
 | Nhật ký cuộc gọi (thoại / video, nhỡ) |              ✅ ô cuộc gọi của Beeper               |                       —                       |
+| Tin nhắn được ghim                    |    ✅ ghim trong phòng (`m.room.pinned_events`)     |                       —                       |
+| Bình chọn (chỉ nhóm)                  |         ✅ poll MSC3381, phiếu được đồng bộ         |          ✅ tạo, bình chọn, kết thúc          |
+| Dòng hệ thống (vào / rời nhóm, ...)   |           ✅ thông báo từ bot của bridge            |                       —                       |
 | Biểu cảm (reaction)                   |                         ✅                          |                      ✅                       |
 | Thu hồi tin nhắn                      |              ✅ xoá luôn trong Beeper               |                      ✅                       |
 | "Xoá ở phía tôi" trên thiết bị khác   |             ✅ cũng bị xoá trong Beeper             |                       —                       |

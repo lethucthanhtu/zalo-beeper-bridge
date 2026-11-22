@@ -3,7 +3,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Bridge } from 'matrix-appservice-bridge';
 import type { MappingStore } from '../mapping-store.ts';
-import { bridgeIdFor, PuppetRegistry } from '../puppet-registry.ts';
+import { PuppetRegistry } from '../puppet-registry.ts';
+import { bridgeIdFor } from '../../matrix/bridge-id.ts';
 
 const registry = (prefix?: string) =>
   new PuppetRegistry({} as Bridge, {} as MappingStore, 'beeper.local', undefined, prefix);

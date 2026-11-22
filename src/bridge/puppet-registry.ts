@@ -1,24 +1,18 @@
 // Zalo uid → Matrix ghost (@<bridge>_<uid>:domain, e.g. @sh-zalo_<uid>): registration + displayname sync.
 import type { Bridge, Intent } from 'matrix-appservice-bridge';
-import { fetchMediaCapped } from './media-handler.ts';
+import { fetchMediaCapped } from './media-fetch.ts';
 import type { MappingStore } from './mapping-store.ts';
 import type { ZaloProfile } from '../zalo/types.ts';
 import { errorMessage } from '../error-message.ts';
-
-/** Default ghost localpart prefix (bridge registered as `sh-zalo`). */
-export const GHOST_PREFIX = 'sh-zalo_';
-
-/**
- * Bridge name from the registration's bot localpart: `bbctl register <name>` makes the bot
- * `<name>bot` and the ghost namespace `@<name>_.+`, so a second bridge (`sh-zalo2`) differs.
- */
-export const bridgeIdFor = (senderLocalpart?: string): string => (senderLocalpart ?? 'sh-zalobot').replace(/bot$/, '');
+import { sleep } from '../util.ts';
+import { AVATAR_MAX_BYTES } from '../matrix/beeper-bridge-state.ts';
+import { bridgeIdFor } from '../matrix/bridge-id.ts';
 
 /**
  * Looks up a Zalo contact's profile. Resolves null when the lookup is not possible
  * yet (e.g. Zalo not logged in) so the caller can retry later.
  */
-export type ProfileResolver = (uid: string) => Promise<ZaloProfile | null>;
+type ProfileResolver = (uid: string) => Promise<ZaloProfile | null>;
 
 /** How long a profile lookup counts as current (contacts without avatar aren't re-asked sooner). */
 const PROFILE_RECHECK_MS = 24 * 60 * 60 * 1000;
@@ -50,7 +44,7 @@ export class PuppetRegistry {
     store: MappingStore,
     domain: string,
     resolveProfile?: ProfileResolver,
-    ghostPrefix = GHOST_PREFIX,
+    ghostPrefix = `${bridgeIdFor()}_`,
   ) {
     this.bridge = bridge;
     this.store = store;
@@ -153,7 +147,7 @@ export class PuppetRegistry {
    */
   private async applyAvatar(zaloUid: string, intent: Intent, avatarUrl: string | undefined): Promise<void> {
     if (avatarUrl && this.store.getPuppetAvatarUrl(zaloUid) !== avatarUrl) {
-      const { buffer, mimetype } = await fetchMediaCapped(avatarUrl, 5 * 1024 * 1024);
+      const { buffer, mimetype } = await fetchMediaCapped(avatarUrl, AVATAR_MAX_BYTES);
       const avatarMxc = await intent.uploadContent(buffer, { type: mimetype, name: 'zalo-avatar' });
       await intent.setAvatarUrl(avatarMxc);
       this.store.setPuppetAvatarUrl(zaloUid, avatarUrl);
@@ -209,7 +203,7 @@ export class PuppetRegistry {
         );
         if (!hadAvatar && this.store.getPuppetAvatarUrl(uid) !== null) result.withAvatar++;
       }
-      if (start + batchSize < pending.length) await new Promise((resolve) => setTimeout(resolve, pauseMs));
+      if (start + batchSize < pending.length) await sleep(pauseMs);
     }
     return result;
   }
