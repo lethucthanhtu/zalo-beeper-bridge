@@ -1,6 +1,7 @@
 // Raw zca-js message → ZaloMessage. All zca-js payload quirks live here.
-import { toMatrixWaveform, type MediaDescriptor } from '../bridge/media-content.ts';
+import { toMatrixWaveform, type MediaDescriptor } from '../media-descriptor.ts';
 import type { RawZaloMessage, ZaloContent, ZaloMessage } from './types.ts';
+import { isHttpUrl, parseParams as parseLooseParams } from '../util.ts';
 import { CALL_ACTIONS, callActionMessage, describeCall } from './call-message.ts';
 
 /** Object-form message content (media, cards, rich text); every field is optional. */
@@ -61,10 +62,16 @@ function normalizeContent(msgType: string, content: unknown): ZaloContent {
   }
   if (msgType === 'chat.photo' && card.href) {
     const params = parseParams(card.params);
+    // The HD copy and the thumbnail are separate signed links; one of them may still load
+    // when href has expired or its CDN node fails
+    const fallbackUrls = [
+      ...new Set([params.hd, card.thumb].filter((u): u is string => typeof u === 'string' && /^https:\/\//.test(u))),
+    ].filter((u) => u !== card.href);
     return {
       kind: 'photo',
       url: card.href,
       thumbUrl: card.thumb,
+      ...(fallbackUrls.length ? { fallbackUrls } : {}),
       width: positive(params.width),
       height: positive(params.height),
       // Zalo puts the photo caption in the title; a bare file name is not a caption
@@ -138,21 +145,13 @@ function normalizeLinkCard(card: AttachmentContent & { href: string }): ZaloCont
   };
 }
 
-/** True for an http(s) URL (Zalo also uses placeholders like "www.zaloapp.com"). */
-const isHttpUrl = (url: string) => /^https?:\/\//.test(url);
-
 /**
  * Parses the JSON-encoded `params` string Zalo attaches to media/card content.
  *
  * @returns the parsed object, or {} when absent, malformed or not an object
  */
 function parseParams(params: string | undefined): Record<string, unknown> {
-  try {
-    const parsed: unknown = JSON.parse(params ?? '{}');
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {}; // params malformed — all fields are optional
-  }
+  return parseLooseParams(params) ?? {}; // all fields are optional
 }
 
 /** chat.webcontent (52) and its v2 variant (61) — type codes from Za-go's msgType table */

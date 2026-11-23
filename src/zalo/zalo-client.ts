@@ -1,6 +1,7 @@
 // Facade over zca-js: the ONLY module allowed to import zca-js runtime classes.
 // Contains login lifecycle, listener resilience, normalization, and rate-limited sends.
 import { EventEmitter } from 'node:events';
+import FormData from 'form-data';
 import {
   GroupMessage,
   Zalo,
@@ -12,13 +13,19 @@ import {
 } from 'zca-js';
 import { loadCredentials, saveCredentials, clearCredentials } from './credential-store.ts';
 import { normalizeZaloMessage } from './event-normalizer.ts';
-import { installFrameTap } from './frame-tap.ts';
+import { normalizeFriendPinEvent, normalizeGroupPinEvent } from './pin-events.ts';
+import { normalizeGroupPollEvent, normalizePollDetail } from './poll-events.ts';
+import { installFrameTap, waitForFileDone } from './frame-tap.ts';
 import { ListenerManager } from './listener-manager.ts';
 import { RateLimiter } from './rate-limiter.ts';
 import type {
   RawZaloMessage,
   ZaloMention,
   ZaloMessage,
+  ZaloPinEvent,
+  ZaloPoll,
+  ZaloPollCreate,
+  ZaloPollEvent,
   ZaloProfile,
   ZaloQuotePayload,
   ZaloReactionEvent,
@@ -28,7 +35,13 @@ import type {
 } from './types.ts';
 import { errorMessage } from '../error-message.ts';
 
-export type ZaloClientOptions = {
+/**
+ * zca-js options for every login attempt. selfListen: own sends (any device) arrive with
+ * isSelf=true, which echo suppression and double-puppeting rely on.
+ */
+const ZALO_OPTIONS = { selfListen: true, checkUpdate: false, logging: false };
+
+type ZaloClientOptions = {
   credsPath: string;
   messagesPerMinute: number;
   burst?: number;
@@ -39,6 +52,8 @@ type ZaloClientEvents = {
   seen: [event: ZaloSeenEvent];
   typing: [event: ZaloTypingEvent];
   reaction: [event: ZaloReactionEvent];
+  pin: [event: ZaloPinEvent];
+  poll: [event: ZaloPollEvent];
   connected: [];
   reconnecting: [attempt: number, delayMs: number];
   dead: [reason: string];
@@ -47,7 +62,7 @@ type ZaloClientEvents = {
   catchUp: [];
 };
 
-export type ListenerState = 'stopped' | 'connected' | 'reconnecting' | 'dead';
+type ListenerState = 'stopped' | 'connected' | 'reconnecting' | 'dead';
 
 /** zca-js ThreadType for a bridge thread type. */
 const toThreadType = (threadType: ZaloThreadType) => (threadType === 'group' ? ThreadType.Group : ThreadType.User);
@@ -169,14 +184,6 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     });
   }
 
-  /**
-   * Builds a fresh zca-js Zalo instance for a login attempt.
-   * selfListen: own sends (any device) arrive with isSelf=true — used for echo suppression.
-   */
-  private newZalo(): Zalo {
-    return new Zalo({ selfListen: true, checkUpdate: false, logging: false });
-  }
-
   /** True while a zca-js API session is held (cleared on logout or listener death). */
   get isLoggedIn(): boolean {
     return this.api !== null;
@@ -207,7 +214,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     const creds = loadCredentials(this.opts.credsPath);
     if (!creds) return false;
     try {
-      this.api = await this.newZalo().login(creds);
+      this.api = await new Zalo(ZALO_OPTIONS).login(creds);
       return true;
     } catch (err) {
       console.warn('Zalo cookie re-login failed:', errorMessage(err));
@@ -241,7 +248,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
    */
   private async doLoginWithQR(deliverQrPng: (png: Buffer) => Promise<void>): Promise<void> {
     let qrRetries = 0;
-    const api = await this.newZalo().loginQR({}, (event) => {
+    const api = await new Zalo(ZALO_OPTIONS).loginQR({}, (event) => {
       switch (event.type) {
         case LoginQRCallbackEventType.QRCodeGenerated:
           // event.data.image is raw base64 PNG (data-URI prefix already stripped by zca-js)
@@ -371,6 +378,18 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
         targetMsgId: String(targetMsgId),
         icon: reaction.data.content.rIcon ?? '',
       });
+    });
+    // Pins: a group pin is a group_event, a DM pin a friend_event (zca-js emits both on the same listener).
+    // Group polls are board group_events too
+    listener.on('group_event', (groupEvent) => {
+      const pin = normalizeGroupPinEvent(groupEvent);
+      if (pin) this.emit('pin', pin);
+      const poll = normalizeGroupPollEvent(groupEvent);
+      if (poll) this.emit('poll', poll);
+    });
+    listener.on('friend_event', (friendEvent) => {
+      const pin = normalizeFriendPinEvent(friendEvent);
+      if (pin) this.emit('pin', pin);
     });
     this.listenerManager.start(this.api);
   }
@@ -574,6 +593,32 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     });
   }
 
+  /**
+   * Fetches one recent message again, so its media links are fresh (Zalo's signed CDN
+   * links expire). A group message is looked up in the newest 200 messages of its group
+   * (getCloudMessage); a DM is read from the cross-thread DM feed, which starts right
+   * after the cursor `msgId - 1` and covers about one week. null when the message is out
+   * of reach, Zalo does not answer, or the listener is busy; never throws.
+   *
+   * @param threadId Zalo thread id of the message
+   * @param threadType whether the thread is a DM or a group
+   * @param msgId Zalo message id to find
+   */
+  async fetchMessage(threadId: string, threadType: ZaloThreadType, msgId: string): Promise<ZaloMessage | null> {
+    if (threadType === 'group') {
+      const history = await this.getGroupHistory(threadId, 200);
+      return history.find((message) => message.msgId === msgId) ?? null;
+    }
+    let cursor: string;
+    try {
+      cursor = String(BigInt(msgId) - 1n);
+    } catch {
+      return null; // not a numeric id: no cursor can point just before it
+    }
+    const page = await this.fetchRecentMessagesPage('user', cursor);
+    return page?.find((message) => message.msgId === msgId && message.threadId === threadId) ?? null;
+  }
+
   /** Group display name via zca-js getGroupInfo; null when unavailable (errors logged, never thrown). */
   async getGroupName(threadId: string): Promise<string | null> {
     if (!this.api) return null;
@@ -608,6 +653,61 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
       threadId,
       type: toThreadType(threadType),
     });
+  }
+
+  /**
+   * Create a poll in a group (Beeper→Zalo). Rate-limited like a message: it posts to the group.
+   *
+   * @returns the created poll, with Zalo's option ids
+   * @throws when not logged in, when the zca-js call fails, or when Zalo's reply is not a poll
+   */
+  async createPoll(groupId: string, poll: ZaloPollCreate): Promise<ZaloPoll> {
+    const api = this.api;
+    if (!api) throw new Error('Not logged in');
+    await this.rateLimiter.acquire();
+    const detail = await api.createPoll(
+      { question: poll.question, options: poll.options, allowMultiChoices: poll.multiChoice },
+      groupId,
+    );
+    const created = normalizePollDetail(detail);
+    if (!created) throw new Error('Zalo returned an unexpected poll reply');
+    return created;
+  }
+
+  /**
+   * Poll options and per-option voters. Not rate-limited — a read.
+   *
+   * @returns null when Zalo's reply is not a poll
+   * @throws when not logged in, or when the zca-js call fails
+   */
+  async getPollDetail(pollId: number): Promise<ZaloPoll | null> {
+    const api = this.api;
+    if (!api) throw new Error('Not logged in');
+    return normalizePollDetail(await api.getPollDetail(pollId));
+  }
+
+  /**
+   * Set the account's vote on a poll (Beeper→Zalo); an empty list removes the vote.
+   * Rate-limited: a vote is visible to the whole group.
+   *
+   * @throws when not logged in, or when the zca-js call fails
+   */
+  async votePoll(pollId: number, optionIds: number[]): Promise<void> {
+    const api = this.api;
+    if (!api) throw new Error('Not logged in');
+    await this.rateLimiter.acquire();
+    await api.votePoll(pollId, optionIds);
+  }
+
+  /**
+   * Lock a poll so nobody can vote any more (Beeper→Zalo). Not rate-limited — a control action.
+   *
+   * @throws when not logged in, or when the zca-js call fails
+   */
+  async lockPoll(pollId: number): Promise<void> {
+    const api = this.api;
+    if (!api) throw new Error('Not logged in');
+    await api.lockPoll(pollId);
   }
 
   /**
@@ -738,16 +838,17 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   }
 
   /**
-   * Send a voice note Beeper→Zalo as a native Zalo voice message (not a file):
-   * the audio is uploaded to Zalo's file CDN with uploadAttachment, then posted with
-   * sendVoice, which only takes a URL. Zalo voice notes are AAC — pass AAC in an
-   * .m4a/.aac file; other codecs (ogg/opus) are not transcoded here.
-   * Waits for the outbound rate limiter.
+   * Send a voice note Beeper→Zalo as a native Zalo voice message (not a file).
+   * Uploads the way Zalo's own clients do (`voice/upload`, which stores the audio on
+   * Zalo's voice CDN), takes the voice URLs from the upload's websocket `file_done`, then
+   * posts the message. When that upload fails, falls back to zca-js uploadAttachment
+   * (generic file CDN): Zalo PC plays such a note, the mobile apps show it as
+   * "not on the cloud" and don't play it. Waits for the outbound rate limiter.
    *
-   * @param data AAC audio bytes (m4a container or raw ADTS)
-   * @param filename must end in .m4a or .aac (zca-js routes uploads by extension)
+   * @param data AAC audio bytes (raw ADTS, as Zalo's clients record it, or m4a)
+   * @param filename must end in .aac or .m4a
    * @returns the sent msgId for echo suppression / recall
-   * @throws when not logged in, the upload yields no file URL, or a zca-js call fails
+   * @throws when not logged in, both uploads yield no URL, or a zca-js call fails
    */
   async sendVoice(
     threadId: string,
@@ -759,15 +860,25 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     if (!api) throw new Error('Not logged in');
     const zaloThreadType = toThreadType(threadType);
     await this.rateLimiter.acquire();
-    const [uploaded] = await withSendTimeout(
-      api.uploadAttachment([{ data, filename, metadata: { totalSize: data.byteLength } }], threadId, zaloThreadType),
-      'voice upload',
-    );
-    if (!uploaded || uploaded.fileType === 'image' || !uploaded.fileUrl) {
-      throw new Error('voice upload returned no file URL');
+    let urls: VoiceUrls;
+    try {
+      urls = await withSendTimeout(
+        uploadVoiceNative(api, { data, filename, threadId, type: zaloThreadType }),
+        'voice upload',
+      );
+    } catch (err) {
+      console.warn(`[zalo] native voice upload failed, sending via the file CDN: ${errorMessage(err)}`);
+      const [uploaded] = await withSendTimeout(
+        api.uploadAttachment([{ data, filename, metadata: { totalSize: data.byteLength } }], threadId, zaloThreadType),
+        'voice upload',
+      );
+      if (!uploaded || uploaded.fileType === 'image' || !uploaded.fileUrl) {
+        throw new Error('voice upload returned no file URL');
+      }
+      urls = { voiceUrl: uploaded.fileUrl, m4aUrl: uploaded.fileUrl };
     }
     const sent = await withSendTimeout(
-      api.sendVoice({ voiceUrl: uploaded.fileUrl }, threadId, zaloThreadType),
+      sendVoiceMessage(api, { ...urls, fileSize: data.byteLength, threadId, type: zaloThreadType }),
       'voice send',
     );
     return sent?.msgId != null ? [String(sent.msgId)] : [];
@@ -863,6 +974,130 @@ function firstLink(text: string): string | undefined {
 }
 
 type LinkCardProps = { msg: string; threadId: string; type: ThreadType; card: Partial<ParseLinkData> };
+
+/** Voice note URLs as Zalo's clients post them: `voiceUrl` (amr, else aac) and `m4aUrl` (aac). */
+type VoiceUrls = { voiceUrl: string; m4aUrl: string };
+type VoiceProps = VoiceUrls & { fileSize: number; threadId: string; type: ThreadType };
+type VoiceUploadProps = { data: Buffer; filename: string; threadId: string; type: ThreadType };
+/** Last-chunk response of a voice upload (URL fields only on some servers). */
+type VoiceUploadResponse = { fileId?: string | number } & Record<string, unknown>;
+
+const VOICE_API = 'bridgeSendVoice';
+const VOICE_UPLOAD_API = 'bridgeUploadVoice';
+/** APIs that already have the custom voice calls (zca-js custom() defines a non-configurable property). */
+const voiceApiInstalled = new WeakSet<API>();
+const voiceUploadApiInstalled = new WeakSet<API>();
+/** How long to wait for the upload's websocket file_done after the last chunk. */
+const VOICE_FILE_DONE_TIMEOUT_MS = 60_000;
+
+/** voiceUrl/m4aUrl from an upload response or file_done data; null when it has no URL. */
+export function pickVoiceUrls(data: Record<string, unknown> | null | undefined): VoiceUrls | null {
+  const str = (value: unknown) => (typeof value === 'string' && value ? value : undefined);
+  const aac = str(data?.aac) ?? str(data?.url);
+  const amr = str(data?.amr);
+  const voiceUrl = amr ?? aac;
+  return voiceUrl ? { voiceUrl, m4aUrl: aac ?? voiceUrl } : null;
+}
+
+/**
+ * The multipart body of one upload chunk (`chunkContent`), built with form-data exactly as
+ * zca-js uploadAttachment does: Zalo's voice endpoint rejects a hand-built body (error 115).
+ */
+export function chunkForm(chunk: Buffer, filename: string): { body: Buffer; headers: Record<string, string> } {
+  const form = new FormData();
+  form.append('chunkContent', chunk, { filename, contentType: 'application/octet-stream' });
+  return { body: form.getBuffer(), headers: form.getHeaders() as Record<string, string> };
+}
+
+/**
+ * Uploads a voice note to Zalo's voice endpoint (`/api/{message|group}/voice/upload`, the
+ * one Zalo PC uses) and returns its voice URLs — from the last chunk's response when it
+ * has them, else from the websocket file_done (see frame-tap waitForFileDone).
+ *
+ * @throws when a chunk request fails, the server returns no file id, or file_done never comes
+ */
+async function uploadVoiceNative(api: API, props: VoiceUploadProps): Promise<VoiceUrls> {
+  if (!voiceUploadApiInstalled.has(api)) {
+    api.custom<VoiceUploadResponse | null, VoiceUploadProps>(VOICE_UPLOAD_API, async ({ ctx, utils, props: p }) => {
+      const group = p.type === ThreadType.Group;
+      const chunkSize = ctx.settings?.features?.sharefile?.chunk_size_file || 2 * 1024 * 1024;
+      const totalChunk = Math.max(1, Math.ceil(p.data.byteLength / chunkSize));
+      const base = {
+        ...(group ? { grid: p.threadId } : { toid: p.threadId }),
+        totalChunk,
+        fileName: p.filename,
+        clientId: Date.now(),
+        totalSize: p.data.byteLength,
+        imei: ctx.imei,
+        isE2EE: 0,
+        fileType: p.filename.toLowerCase().endsWith('.amr') ? 'amr' : 'aac',
+      };
+      let last: VoiceUploadResponse | null = null;
+      for (let chunkId = 1; chunkId <= totalChunk; chunkId++) {
+        const encrypted = utils.encodeAES(JSON.stringify({ ...base, chunkId }));
+        if (!encrypted) throw new Error('Failed to encrypt voice upload params');
+        const url = utils.makeURL(`${api.zpwServiceMap.file[0]}/api/${group ? 'group' : 'message'}/voice/upload`, {
+          type: group ? 11 : 2,
+          params: encrypted,
+        });
+        const form = chunkForm(p.data.subarray((chunkId - 1) * chunkSize, chunkId * chunkSize), p.filename);
+        const response = await utils.request(url, {
+          method: 'POST',
+          headers: form.headers,
+          body: form.body as unknown as BodyInit, // a Buffer, as zca-js sends it
+        });
+        last = (await utils.resolve(response)) as VoiceUploadResponse | null;
+      }
+      return last;
+    });
+    voiceUploadApiInstalled.add(api);
+  }
+  const call = (api as unknown as Record<string, (p: VoiceUploadProps) => Promise<VoiceUploadResponse | null>>)[
+    VOICE_UPLOAD_API
+  ];
+  const uploaded = await call!(props);
+  console.log(`[zalo] voice upload response fields: ${Object.keys(uploaded ?? {}).join(',') || '(none)'}`);
+  const direct = pickVoiceUrls(uploaded);
+  if (direct) return direct;
+  const fileId = uploaded?.fileId;
+  if (fileId == null || String(fileId) === '-1') throw new Error('voice upload returned no file id');
+  const done = await waitForFileDone(String(fileId), VOICE_FILE_DONE_TIMEOUT_MS);
+  console.log(`[zalo] voice file_done fields: ${Object.keys(done).join(',') || '(none)'}`);
+  const urls = pickVoiceUrls(done);
+  if (!urls) throw new Error('voice file_done had no URL');
+  return urls;
+}
+
+/**
+ * Posts an uploaded voice note (msgType 3 via `forward`) with the fields Zalo's clients
+ * send: `{voiceUrl, m4aUrl, fileSize}`. Registered through zca-js `api.custom`.
+ */
+async function sendVoiceMessage(api: API, props: VoiceProps): Promise<{ msgId?: string | number } | null> {
+  if (!voiceApiInstalled.has(api)) {
+    api.custom<{ msgId?: string | number } | null, VoiceProps>(VOICE_API, async ({ ctx, utils, props: p }) => {
+      const group = p.type === ThreadType.Group;
+      const url = utils.makeURL(`${api.zpwServiceMap.file[0]}/api/${group ? 'group' : 'message'}/forward`);
+      const params: Record<string, unknown> = {
+        ttl: 0,
+        zsource: -1,
+        msgType: 3,
+        clientId: Date.now().toString(),
+        msgInfo: JSON.stringify({ voiceUrl: p.voiceUrl, m4aUrl: p.m4aUrl, fileSize: p.fileSize }),
+        imei: ctx.imei,
+        ...(group ? { grid: p.threadId, visibility: 0 } : { toId: p.threadId }),
+      };
+      const encrypted = utils.encodeAES(JSON.stringify(params));
+      if (!encrypted) throw new Error('Failed to encrypt voice params');
+      const response = await utils.request(url, { method: 'POST', body: new URLSearchParams({ params: encrypted }) });
+      return utils.resolve(response) as Promise<{ msgId?: string | number } | null>;
+    });
+    voiceApiInstalled.add(api);
+  }
+  const call = (api as unknown as Record<string, (p: VoiceProps) => Promise<{ msgId?: string | number } | null>>)[
+    VOICE_API
+  ];
+  return call!(props);
+}
 
 const CARD_API = 'bridgeSendLinkCard';
 /** APIs that already have the custom card call (zca-js custom() defines a non-configurable property). */

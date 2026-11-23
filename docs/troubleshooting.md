@@ -63,6 +63,7 @@ Zalo does not re-send missed messages, so the bridge fetches them itself after e
 - The chat shows a notice `⚠ Failed to send <type> to Zalo: <reason>` with Zalo's error.
 - Media larger than `bridge.mediaMaxBytes` (default 10 MB) is rejected. Raise the cap or send a smaller file.
 - Voice notes go to Zalo as voice messages. AAC (Beeper iOS) is sent as is. Other codecs (ogg/opus from Beeper Android) are re-encoded to AAC with `ffmpeg`. If a voice note still arrives as a file, the log has `[audio] voice transcode to AAC failed: …`. The usual cause is that `ffmpeg` is not on the PATH when the bridge runs outside the container.
+- **Known bug (open):** voice notes sent from Beeper play in Zalo PC but not in the Zalo iOS/Android apps, which show "chưa có trên cloud". The bridge uploads to Zalo's voice endpoint (`/api/{message|group}/voice/upload`, the one Zalo PC uses). The server accepts the upload and returns a `fileId`, but no `file_done` control with the `aac`/`amr` URLs reaches the bridge, so after 60 s it falls back to the file CDN. The log then shows `voice upload response fields: finished,clientFileId,chunkId,fileId` followed by `native voice upload failed, sending via the file CDN: voice upload timed out after 60s`.
 
 ## `[Zalo video / file could not be bridged: …]` notice
 
@@ -112,6 +113,7 @@ The bot profile is "Zalo" and the portals carry the network branding. The top-le
 - **`Zalo main window not found`**: Zalo PC is not running with `--remote-debugging-port=9229`, or it is still starting.
 - **`bad tar header — wrong UIN`**: the key does not belong to this backup. Read it from the Zalo PC session of the account that created the backup.
 - **A chat ends `FAIL`**: its old room is untouched, and any half-built room is deleted automatically. Check `run.log` and re-run the script. It skips the chats that already finished OK.
+- **`Beeper asked to slow down (ENHANCE_YOUR_CALM), retry N in Ns`**: Beeper reset a request because the import sent too many too fast. The importer waits 30 seconds, then 1, 2 and 4 minutes, and sends the same request again; the chat fails only if the fifth attempt is reset too. If that happens, let Beeper rest for 30–60 minutes before re-running, and run one import at a time.
 - **`WARNING … live message(s) could not be carried over`**: the Matrix event of a live-only message could not be read. In that case the old room is not removed.
 - **Photos or videos show as text lines**: the CDN copy expired and the backup has no copy, so nothing holds the file any more.
 

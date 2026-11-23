@@ -9,7 +9,7 @@
 // (Field precedence is inferred from mautrix-go; Beeper's client is closed-source.)
 import fs from 'node:fs';
 import type { Bridge, Intent } from 'matrix-appservice-bridge';
-import { bridgeIdFor } from '../bridge/puppet-registry.ts';
+import { bridgeIdFor } from './bridge-id.ts';
 import type { ZaloThreadType } from '../zalo/types.ts';
 import { errorMessage } from '../error-message.ts';
 

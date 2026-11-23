@@ -52,6 +52,9 @@ The docs are a [VitePress](https://vitepress.dev/) site: `npm run docs:dev` prev
 | Contact cards (danh thiếp)         |       ✅ QR code + name, phone and a `zalo.me` link        |                     —                      |
 | Web cards (`chat.webcontent`)      |               ✅ text (title + description)                |                     —                      |
 | Call logs (voice / video, missed)  |                    ✅ Beeper call tile                     |                     —                      |
+| Pinned messages                    |       ✅ pinned in the room (`m.room.pinned_events`)       |                     —                      |
+| Polls (groups only)                |              ✅ MSC3381 poll, votes mirrored               |            ✅ create, vote, end            |
+| System lines (joins, leaves, ...)  |               ✅ notice from the bridge bot                |                     —                      |
 | Reactions                          |                             ✅                             |                     ✅                     |
 | Message recall                     |                  ✅ removed in Beeper too                  |                     ✅                     |
 | Deleted "for me" on another device |                  ✅ removed in Beeper too                  |                     —                      |

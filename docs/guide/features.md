@@ -18,6 +18,9 @@
 | Contact cards (danh thiếp)         |       ✅ QR code + name, phone and a `zalo.me` link        |                     —                      |
 | Web cards (`chat.webcontent`)      |               ✅ text (title + description)                |                     —                      |
 | Call logs (voice / video, missed)  |     ✅ Beeper call tile (`com.beeper.action_message`)      |                     —                      |
+| Pinned messages                    |       ✅ pinned in the room (`m.room.pinned_events`)       |                     —                      |
+| Polls (groups only)                |              ✅ MSC3381 poll, votes mirrored               |            ✅ create, vote, end            |
+| System lines (joins, leaves, ...)  |               ✅ notice from the bridge bot                |                     —                      |
 | Reactions                          |                             ✅                             |                     ✅                     |
 | Message recall                     |                  ✅ removed in Beeper too                  |                     ✅                     |
 | Deleted "for me" on another device |                  ✅ removed in Beeper too                  |                     —                      |
@@ -70,6 +73,23 @@ A Zalo contact card shows the contact's QR code with name and phone. The `zalo.m
 Zalo voice, video and missed calls show as Beeper call tiles, with the direction and duration as the text ("Cuộc gọi video đến · 1:05"). Calls cannot be made or answered from Beeper.
 
 On Beeper mobile, tapping a call tile shows "Couldn't open Self-hosted" instead of opening Zalo. The Beeper app chooses which app to open from the bridge type, and it only knows the official networks. The bridge cannot change this: tests with `external_url` (`https://zalo.me`, `zalo://`) on the event did not help. Open Zalo yourself to call back.
+
+### Polls
+
+Polls work in group chats only (Zalo has no polls in DMs).
+
+- **Zalo to Beeper.** A poll created on Zalo shows as a Matrix poll (MSC3381) from its creator. Each vote is mirrored as a poll response from the voter, and a poll that is locked or deleted on Zalo ends in Beeper. For an anonymous poll Zalo does not say who voted, so the bridge bot posts the running tallies as a notice instead.
+- **Beeper to Zalo.** A poll you create in a group chat is created on Zalo with the same question and answers ("allow multiple answers" is kept). Your votes (an empty vote removes it) and ending the poll are sent to Zalo too. In a DM the bridge replies with a notice and sends nothing.
+- **Encrypted rooms.** Poll events are encrypted like messages, so polls work in end-to-bridge encrypted rooms.
+- **Limits.** Zalo-side options such as "add options" or "pin poll" are not mirrored, and a poll is not editable once created. Only the account owner's own polls can be ended on Zalo.
+
+### Pinned messages and system lines
+
+When someone pins or unpins a message on Zalo, the bridge pins or unpins the same message in the room (the room's `m.room.pinned_events` state), as the person who did it. The other pins in the room are kept. If the pinned message was never bridged (for example it is older than the bridge), the room gets a short notice from the bridge bot instead.
+
+Other system lines from Zalo (someone joined or left a group, and similar) are posted as a notice from the bridge bot, so they never look like something a person wrote. A DM created before encryption was added does not have the bot in it: the bridge invites the bot, and if that fails it posts the line as the other person's ghost, the only other member who can speak there.
+
+Pinning or unpinning in Beeper does not change the pins on Zalo.
 
 ### Recall
 

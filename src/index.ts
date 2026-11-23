@@ -6,16 +6,28 @@ import { Logger } from 'matrix-appservice-bridge';
 import { loadConfig } from './config.ts';
 import { EchoSuppressor } from './bridge/echo-suppressor.ts';
 import { InboundHandler } from './bridge/inbound-handler.ts';
+import { MediaRepairQueue } from './bridge/media-repair.ts';
 import { MappingStore } from './bridge/mapping-store.ts';
 import { ownerIntent } from './bridge/owner-intent.ts';
 import { OutboundHandler } from './bridge/outbound-handler.ts';
 import { PortalManager } from './bridge/portal-manager.ts';
 import { PresenceHandler } from './bridge/presence-handler.ts';
-import { bridgeIdFor, PuppetRegistry } from './bridge/puppet-registry.ts';
+import { PuppetRegistry } from './bridge/puppet-registry.ts';
+import { bridgeIdFor } from './matrix/bridge-id.ts';
 import { SyncManager } from './bridge/sync-manager.ts';
 import { createBridge, loadRegistration, startBridge } from './matrix/appservice.ts';
+import { MatrixClient } from '@vector-im/matrix-bot-sdk';
+import {
+  createCryptoAppService,
+  decryptAttachment,
+  initBotCrypto,
+  installEncryptedSend,
+  prepareIncomingEvent,
+  type RoomEncryption,
+  type SendingClient,
+} from './matrix/crypto.ts';
 import { AVATAR_MAX_BYTES, createZaloStatePublisher } from './matrix/beeper-bridge-state.ts';
-import { fetchMediaCapped } from './bridge/media-handler.ts';
+import { fetchMediaCapped } from './bridge/media-fetch.ts';
 import { handleBotEvent, type BotCommandContext } from './matrix/bot-commands.ts';
 import { bridgeBranding, ensureNetworkIdentity } from './matrix/network-branding.ts';
 import { ZaloClient } from './zalo/zalo-client.ts';
@@ -39,6 +51,10 @@ const store = new MappingStore(config.bridge.dbPath);
 
 const echoSuppressor = new EchoSuppressor();
 
+const botUserId = `@${registration.getSenderLocalpart()}:${config.matrix.domain}`;
+// Set once the bot crypto device is up (encryption.enabled); unset = rooms are handled plain
+let roomCrypto: RoomEncryption | undefined;
+
 // `outbound`, `presence` and `botContext` are declared further down; these handlers only
 // run once startBridge() is listening, by which time all exist.
 const bridge = createBridge(
@@ -48,7 +64,24 @@ const bridge = createBridge(
    * Matrix timeline/state event: portal traffic goes to the outbound (Matrix → Zalo) handler,
    * everything else to the management-bot command handler.
    */
-  async (event) => {
+  async (rawEvent) => {
+    let event = rawEvent;
+    if (roomCrypto) {
+      const prepared = await prepareIncomingEvent(event as unknown as Record<string, unknown>, {
+        rooms: roomCrypto,
+        isBridgeUser: (userId) => userId === botUserId || registration.isUserMatch(userId, false),
+        onDecryptFailure: async (failed, err) => {
+          console.warn(`[crypto] could not decrypt ${String(failed.event_id)} in ${String(failed.room_id)}:`, err);
+          if (event.room_id && store.isPortalRoom(event.room_id))
+            await bridge.getIntent().sendMessage(event.room_id, {
+              msgtype: 'm.notice',
+              body: '⚠️ Bridge không giải mã được tin này nên chưa gửi sang Zalo',
+            });
+        },
+      });
+      if (!prepared) return;
+      event = prepared as unknown as typeof rawEvent;
+    }
     // Portal rooms carry conversation traffic (outbound); everything else is bot commands
     if (event.room_id && store.isPortalRoom(event.room_id)) {
       await outbound.handle(event);
@@ -88,7 +121,8 @@ const puppets = new PuppetRegistry(
   (uid) => zalo.getUserProfile(uid),
   `${bridgeAppId}_`,
 );
-const portals = new PortalManager(bridge, store, puppets, config.matrix.owner, branding);
+// roomCrypto is set further down, once the bot device is up: resolve it lazily
+const portals = new PortalManager(bridge, store, puppets, config.matrix.owner, branding, () => roomCrypto);
 const inbound = new InboundHandler({
   bridge,
   store,
@@ -101,7 +135,21 @@ const inbound = new InboundHandler({
   resolveStickerUrl: (stickerId) => zalo.getStickerImageUrl(stickerId),
   getOwnZaloId: () => zalo.ownId,
   bridgedEventIds,
+  isEncrypted: async (roomId) => (await roomCrypto?.isEncrypted(roomId)) ?? false,
+  getPollDetail: (pollId) => zalo.getPollDetail(pollId),
+  // Zalo sends a system bubble next to a pin event, in either order: wait this long for the pair
+  pinBubbleHoldMs: 1500,
+  // mediaRepair is declared just below; a failure can only happen once messages flow
+  onMediaFailure: (msg) => mediaRepair.schedule(msg),
 });
+// Media that failed to bridge is retried in the background (stored links, then fresh ones)
+const mediaRepair = new MediaRepairQueue({
+  repair: (msg) => inbound.repairMedia(msg),
+  refetch: (ref) => zalo.fetchMessage(ref.threadId, ref.threadType, ref.msgId),
+});
+// Failures from before a restart: picked up once the listener is connected (re-fetch only)
+const MEDIA_REPAIR_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+let mediaRepairResumed = false;
 
 const outbound = new OutboundHandler({
   bridge,
@@ -113,6 +161,7 @@ const outbound = new OutboundHandler({
   mediaMaxBytes: config.bridge.mediaMaxBytes,
   homeserverUrl: config.matrix.homeserverUrl,
   matrixToken: asToken,
+  decryptAttachment: config.encryption.enabled ? decryptAttachment : undefined,
   bridgedEventIds,
 });
 const syncManager = new SyncManager({ zalo, portals, inbound, store });
@@ -122,6 +171,12 @@ const botContext: BotCommandContext = {
   ownerUserId: config.matrix.owner,
   runSync: () => syncManager.run(),
   listAccounts: () => store.listAccounts(),
+  listMediaFailures: () =>
+    store.listOpenMediaFailures().map((room) => {
+      const portal = store.getPortalByRoom(room.roomId);
+      return { ...room, name: portal?.name ?? null, threadId: portal?.thread_id ?? null };
+    }),
+  mediaRepairQueued: () => mediaRepair.size(),
 };
 
 // Fail fast if computed ghost MXIDs cannot be registered under this appservice
@@ -172,6 +227,21 @@ zalo.on('connected', () => {
     }
   }
   void portals.repairDmGhostNames().catch((err: unknown) => console.warn('DM name repair failed:', err));
+  if (!mediaRepairResumed) {
+    mediaRepairResumed = true;
+    try {
+      const open = store.listOpenMediaFailuresSince(Date.now() - MEDIA_REPAIR_LOOKBACK_MS);
+      for (const failure of open)
+        mediaRepair.scheduleRefetch({
+          msgId: failure.zaloMsgId,
+          threadId: failure.threadId,
+          threadType: failure.threadType,
+        });
+      if (open.length) console.log(`[media] ${open.length} recent media failures queued for repair`);
+    } catch (err) {
+      console.warn('[media] could not queue recent media failures:', errorMessage(err));
+    }
+  }
   if (!profileRepairStarted && Date.now() - profileRepairFailedAt >= PROFILE_REPAIR_RETRY_AFTER_MS) {
     profileRepairStarted = true;
     void puppets
@@ -213,6 +283,18 @@ zalo.on('message', (message) => {
   );
   inbound.handle(message);
 });
+// Pins / unpins (group_event + friend_event) → m.room.pinned_events state
+zalo.on('pin', (pinEvent) => {
+  console.log(
+    `[zalo] ${pinEvent.action} ${pinEvent.threadType} thread=${pinEvent.threadId} msg=${pinEvent.msgId ?? '-'}`,
+  );
+  inbound.handlePin(pinEvent);
+});
+// Group polls (group_event board topics) → MSC3381 poll events
+zalo.on('poll', (pollEvent) => {
+  console.log(`[zalo] poll ${pollEvent.action} thread=${pollEvent.threadId} poll=${pollEvent.pollId}`);
+  inbound.handlePoll(pollEvent);
+});
 const presence = new PresenceHandler(store, puppets, zalo, config.matrix.owner, () => zalo.ownId, {
   ownerIntent: () => ownerIntent(bridge, config.matrix.owner),
   bridgedEventIds,
@@ -237,7 +319,33 @@ zalo.on(
 
 // Appservice MUST be up before the Zalo listener: intents throw pre-initialise,
 // and the old_messages replay burst arrives immediately on ws connect
-await startBridge(bridge, config);
+// Experimental encryption: a crypto device for the bot, fed from appservice transactions.
+// A failure here leaves the bridge running unencrypted.
+let cryptoAppService: ReturnType<typeof createCryptoAppService> | undefined;
+if (config.encryption.enabled) {
+  try {
+    const botCrypto = await initBotCrypto({
+      homeserverUrl: config.matrix.homeserverUrl,
+      botUserId,
+      asToken,
+      storePath: config.encryption.storePath,
+    });
+    cryptoAppService = createCryptoAppService(registration.getHomeserverToken()!, (body) =>
+      botCrypto.handleTransaction(body),
+    );
+    roomCrypto = botCrypto.rooms;
+    // Ghost and bot clients share bot-sdk's MatrixClient: encrypt their sends in encrypted rooms
+    installEncryptedSend(MatrixClient.prototype as unknown as SendingClient, botCrypto.rooms);
+    // hungryserv sends no device_lists: re-query the owner's devices now and then so new
+    // Beeper logins receive room keys
+    const refreshOwnerDevices = () => botCrypto.refreshDevices([config.matrix.owner]);
+    refreshOwnerDevices();
+    setInterval(refreshOwnerDevices, 10 * 60_000).unref();
+  } catch (err) {
+    console.error('[crypto] encryption disabled, device setup failed:', err);
+  }
+}
+await startBridge(bridge, config, cryptoAppService);
 await ensureNetworkIdentity(bridge, branding);
 // Backfill the network chip on portals created before branding existed
 void portals.rebrandExistingPortals().catch((err: unknown) => console.warn('portal rebrand failed:', err));
@@ -246,6 +354,8 @@ void portals.rebrandExistingPortals().catch((err: unknown) => console.warn('port
 void portals
   .removeMalformedPortals()
   .then(() => portals.joinOwnerToExistingPortals())
+  // In-place E2EE upgrade of plaintext portals (history stays plaintext, new messages are encrypted)
+  .then(() => (roomCrypto && config.encryption.upgradeExisting ? portals.encryptExistingPortals() : 0))
   .catch((err: unknown) => console.warn('portal repair failed:', err));
 
 // Silent cookie re-login at startup; QR (via 'login' command) when absent/expired

@@ -24,11 +24,13 @@ function mockBridge() {
     ensureRegistered: vi.fn(async () => undefined),
     setDisplayName: vi.fn(async () => undefined),
     setAvatarUrl: vi.fn(async () => undefined),
-    join: vi.fn(async () => undefined),
+    join: vi.fn(async (_roomId: string) => undefined),
     matrixClient: { leaveRoom: vi.fn(async () => undefined) },
-    invite: vi.fn(async () => undefined),
+    invite: vi.fn(async (_roomId: string, _userId: string) => undefined),
     uploadContent: vi.fn(async () => 'mxc://logo'),
-    sendStateEvent: vi.fn(async () => ({ event_id: '$s' })),
+    sendStateEvent: vi.fn(async (_roomId: string, _type: string, _key?: string, _content?: unknown) => ({
+      event_id: '$s',
+    })),
     userId: '@sh-zalobot:beeper.local',
     opts: { registered: false },
   };
@@ -74,6 +76,223 @@ describe('PortalManager', () => {
     expect(createRoom.mock.calls[0]?.[0]).toMatchObject({
       createAsClient: true,
       options: { is_direct: true, invite: [OWNER], name: 'Alice' },
+    });
+  });
+
+  describe('with encryption on', () => {
+    const BOT = '@sh-zalobot:beeper.local';
+    const branding = {
+      name: 'Zalo',
+      logoPath: 'assets/zalo-logo.png',
+      networkId: 'zalo',
+      stateKey: 'beeper.local/sh-zalo',
+    };
+    const encrypted = () => {
+      const calls: string[] = [];
+      const already = new Set<string>();
+      const rooms = {
+        markEncrypted: vi.fn(async (roomId: string) => void calls.push(`mark ${roomId}`)),
+        isEncrypted: vi.fn(async (roomId: string) => {
+          calls.push(`check ${roomId}`);
+          return already.has(roomId);
+        }),
+      };
+      return { rooms, calls, already };
+    };
+    const ENCRYPTION_STATE = {
+      type: 'm.room.encryption',
+      state_key: '',
+      content: { algorithm: 'm.megolm.v1.aes-sha2' },
+    };
+
+    it('creates a DM encrypted, hides the bot as a service member and lets it join before marking the room', async () => {
+      const { bridge, intent, createRoom } = mockBridge();
+      const { rooms, calls } = encrypted();
+      intent.invite.mockImplementation(
+        async (roomId: string, userId: string) => void calls.push(`invite ${roomId} ${userId}`),
+      );
+      intent.join.mockImplementation(async (roomId: string) => void calls.push(`join ${roomId}`));
+      const portals = new PortalManager(
+        bridge,
+        store,
+        new PuppetRegistry(bridge, store, 'beeper.local'),
+        OWNER,
+        branding,
+        () => rooms,
+      );
+
+      const portal = await portals.getOrCreatePortal({
+        threadId: 't1',
+        threadType: 'user',
+        senderId: 'u1',
+        senderName: 'Alice',
+      });
+
+      expect(createRoom.mock.calls[0]?.[0]).toMatchObject({
+        createAsClient: true,
+        options: { is_direct: true, invite: [OWNER], initial_state: [ENCRYPTION_STATE] },
+      });
+      expect(intent.sendStateEvent).toHaveBeenCalledWith(portal.room_id, 'io.element.functional_members', '', {
+        service_members: [BOT],
+      });
+      // the bot must be in the room before the tracker reads its state, or it caches "plain"
+      const own = calls.filter((c) => c.includes(portal.room_id));
+      expect(own.slice(0, 3)).toEqual([
+        `invite ${portal.room_id} ${BOT}`,
+        `join ${portal.room_id}`,
+        `mark ${portal.room_id}`,
+      ]);
+    });
+
+    it('creates a group encrypted and marks it right away (the bot created it)', async () => {
+      const { bridge, intent, createRoom } = mockBridge();
+      const { rooms } = encrypted();
+      const portals = new PortalManager(
+        bridge,
+        store,
+        new PuppetRegistry(bridge, store, 'beeper.local'),
+        OWNER,
+        branding,
+        () => rooms,
+      );
+      const portal = await portals.getOrCreatePortal({
+        threadId: 'g1',
+        threadType: 'group',
+        senderId: 'u1',
+        resolveGroupName: async () => 'Team',
+      });
+      expect(createRoom.mock.calls[0]?.[0]).toMatchObject({
+        options: { preset: 'private_chat', name: 'Team', initial_state: [ENCRYPTION_STATE] },
+      });
+      expect(rooms.markEncrypted).toHaveBeenCalledWith(portal.room_id);
+      expect(intent.sendStateEvent).not.toHaveBeenCalledWith(
+        portal.room_id,
+        'io.element.functional_members',
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    it('encrypts detached (history rebuild) portals the same way', async () => {
+      const { bridge, createRoom } = mockBridge();
+      const { rooms } = encrypted();
+      const portals = new PortalManager(
+        bridge,
+        store,
+        new PuppetRegistry(bridge, store, 'beeper.local'),
+        OWNER,
+        branding,
+        () => rooms,
+      );
+      const portal = await portals.createDetachedPortal({
+        threadId: 't9',
+        threadType: 'user',
+        senderId: 'u9',
+        senderName: 'Bob',
+      });
+      expect(createRoom.mock.calls[0]?.[0]).toMatchObject({ options: { initial_state: [ENCRYPTION_STATE] } });
+      expect(rooms.markEncrypted).toHaveBeenCalledWith(portal.room_id);
+    });
+
+    it('upgrades existing plaintext portals in place: bot in first, creator sends the state', async () => {
+      const { bridge, intent } = mockBridge();
+      const { rooms, calls, already } = encrypted();
+      intent.join.mockImplementation(async (roomId: string) => void calls.push(`join ${roomId}`));
+      intent.sendStateEvent.mockImplementation(async (roomId: string, type: string) => {
+        calls.push(`state ${roomId} ${type}`);
+        return { event_id: '$s' };
+      });
+      store.insertPortal({ thread_id: '111', thread_type: 'user', room_id: '!dm:x', name: 'Alice' });
+      store.insertPortal({ thread_id: '222', thread_type: 'group', room_id: '!grp:x', name: 'Team' });
+      store.insertPortal({ thread_id: '333', thread_type: 'group', room_id: '!done:x', name: 'Done' });
+      already.add('!done:x');
+      const portals = new PortalManager(
+        bridge,
+        store,
+        new PuppetRegistry(bridge, store, 'beeper.local'),
+        OWNER,
+        branding,
+        () => rooms,
+      );
+
+      expect(await portals.encryptExistingPortals(0)).toBe(2);
+
+      const dm = calls.filter((c) => c.includes('!dm:x'));
+      expect(dm).toEqual([
+        'state !dm:x io.element.functional_members',
+        'join !dm:x',
+        'check !dm:x',
+        'state !dm:x m.room.encryption',
+        'mark !dm:x',
+      ]);
+      expect(calls.filter((c) => c.includes('!grp:x'))).toEqual([
+        'check !grp:x',
+        'state !grp:x m.room.encryption',
+        'mark !grp:x',
+      ]);
+      expect(intent.sendStateEvent).toHaveBeenCalledWith('!grp:x', 'm.room.encryption', '', {
+        algorithm: 'm.megolm.v1.aes-sha2',
+      });
+      // already encrypted: checked, never re-sent
+      expect(calls.filter((c) => c.includes('!done:x'))).toEqual(['check !done:x']);
+    });
+
+    it('skips a room that fails and carries on with the rest', async () => {
+      const { bridge, intent } = mockBridge();
+      const { rooms } = encrypted();
+      intent.sendStateEvent.mockImplementation(async (roomId: string, type: string) => {
+        if (roomId === '!bad:x' && type === 'm.room.encryption') throw new Error('M_FORBIDDEN');
+        return { event_id: '$s' };
+      });
+      store.insertPortal({ thread_id: '1', thread_type: 'group', room_id: '!bad:x', name: 'Bad' });
+      store.insertPortal({ thread_id: '2', thread_type: 'group', room_id: '!ok:x', name: 'Ok' });
+      const portals = new PortalManager(
+        bridge,
+        store,
+        new PuppetRegistry(bridge, store, 'beeper.local'),
+        OWNER,
+        branding,
+        () => rooms,
+      );
+      expect(await portals.encryptExistingPortals(0)).toBe(1);
+      expect(rooms.markEncrypted).toHaveBeenCalledWith('!ok:x');
+      expect(rooms.markEncrypted).not.toHaveBeenCalledWith('!bad:x');
+    });
+
+    it('does nothing in place while the crypto device is not up', async () => {
+      const { bridge, intent } = mockBridge();
+      store.insertPortal({ thread_id: '2', thread_type: 'group', room_id: '!grp:x', name: 'Team' });
+      const portals = new PortalManager(
+        bridge,
+        store,
+        new PuppetRegistry(bridge, store, 'beeper.local'),
+        OWNER,
+        branding,
+        () => undefined,
+      );
+      expect(await portals.encryptExistingPortals(0)).toBe(0);
+      expect(intent.sendStateEvent).not.toHaveBeenCalled();
+    });
+
+    it('stays plaintext while the crypto device is not up yet', async () => {
+      const { bridge, intent, createRoom } = mockBridge();
+      const portals = new PortalManager(
+        bridge,
+        store,
+        new PuppetRegistry(bridge, store, 'beeper.local'),
+        OWNER,
+        branding,
+        () => undefined,
+      );
+      await portals.getOrCreatePortal({ threadId: 't1', threadType: 'user', senderId: 'u1', senderName: 'Alice' });
+      const options = (createRoom.mock.calls[0]?.[0] as { options: Record<string, unknown> }).options;
+      expect(options).not.toHaveProperty('initial_state');
+      expect(intent.sendStateEvent).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'io.element.functional_members',
+        expect.anything(),
+        expect.anything(),
+      );
     });
   });
 

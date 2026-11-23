@@ -3,6 +3,8 @@
 // only sustained sending is paced (protects the main account without adding
 // visible latency to real conversations). Refills at `perMinute` tokens/min.
 
+import { sleep } from '../util.ts';
+
 /** Token bucket with serialized acquires; see the file header for the pacing rationale. */
 export class RateLimiter {
   private readonly capacity: number;
@@ -52,7 +54,7 @@ export class RateLimiter {
     this.refill();
     if (this.tokens < 1) {
       const waitMs = Math.ceil((1 - this.tokens) / this.refillPerMs);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      await sleep(waitMs);
       this.refill();
     }
     this.tokens = Math.max(0, this.tokens - 1);

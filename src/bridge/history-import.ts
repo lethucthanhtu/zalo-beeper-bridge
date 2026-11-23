@@ -7,7 +7,10 @@
 // (Zalo CDN links expire ~14 days after sending).
 import { CALL_ACTIONS, callActionMessage, describeCall, type BeeperActionMessage } from '../zalo/call-message.ts';
 import type { ZaloMention } from '../zalo/types.ts';
-import { toMatrixWaveform, type LinkPreview, type MediaDescriptor } from './media-content.ts';
+import { isHttpUrl, joinLines, parseParams, positiveNumber } from '../util.ts';
+import { ZALO_EMOTICON_API } from './media-fetch.ts';
+import { mediaGoneBody } from './zalo-render.ts';
+import { toMatrixWaveform, type LinkPreview, type MediaDescriptor } from '../media-descriptor.ts';
 
 /** One exported Zalo PC message row (subset of fields the exporter keeps). */
 export type ExportRow = {
@@ -64,44 +67,60 @@ export function parseThreadKey(key: string): { threadId: string; threadType: 'us
   return key.startsWith('g') ? { threadId: key.slice(1), threadType: 'group' } : { threadId: key, threadType: 'user' };
 }
 
+/** One reacted message of a `<key>.reactions.json` export sidecar, flattened per reaction. */
+export type ExportReactionEntry = {
+  /** global Zalo msgId of the reacted message ('' when unknown) */
+  msgId: string;
+  /** client msgId of the reacted message ('' when unknown) */
+  cliMsgId: string;
+  /** one item per (reactor, reaction type); reactor "0" is the account owner */
+  reactions: Array<{ reactor: string; rType: string }>;
+};
+
+/**
+ * Parses a `<key>.reactions.json` sidecar written by export-cdp.mjs: an array of
+ * `{ rMsgId, rCli, reactions: { reactorUid: { rType: count } } }`. Reaction types with a
+ * count of 0 or less are dropped, as are entries with no message id or no reactions.
+ *
+ * @throws when the text is not valid JSON or not an array
+ */
+export function parseReactionSidecar(text: string): ExportReactionEntry[] {
+  const raw: unknown = JSON.parse(text);
+  if (!Array.isArray(raw)) throw new Error('reactions sidecar is not an array');
+  const entries: ExportReactionEntry[] = [];
+  for (const item of raw as Array<Record<string, unknown>>) {
+    // Zalo uses 0 for an id it does not have
+    const idOf = (value: unknown) => (asText(value) === '0' ? '' : asText(value));
+    const msgId = idOf(item?.rMsgId);
+    const cliMsgId = idOf(item?.rCli);
+    const byReactor = item?.reactions;
+    if ((!msgId && !cliMsgId) || !byReactor || typeof byReactor !== 'object') continue;
+    const reactions: ExportReactionEntry['reactions'] = [];
+    for (const [reactor, types] of Object.entries(byReactor as Record<string, unknown>)) {
+      if (!types || typeof types !== 'object') continue;
+      for (const [rType, count] of Object.entries(types as Record<string, unknown>))
+        if (typeof count !== 'number' || count > 0) reactions.push({ reactor, rType });
+    }
+    if (reactions.length) entries.push({ msgId, cliMsgId, reactions });
+  }
+  return entries;
+}
+
 /** Loosely typed JSON object as found in exported message payloads. */
 type JsonObject = Record<string, unknown>;
 
 /** Exported fields mix strings and numbers: a string as-is, a number stringified, anything else ''. */
 const asText = (value: unknown): string =>
   typeof value === 'string' ? value : typeof value === 'number' ? String(value) : '';
-/** Positive numeric value (number or numeric string); undefined for 0, negatives and non-numbers. */
-const positiveNumber = (value: unknown): number | undefined => (Number(value) > 0 ? Number(value) : undefined);
 
 /**
  * Zalo stores `params` (and a template's `msg`) either as an object or as a JSON string;
  * normalises both to an object. Returns {} when absent or unparsable (never throws).
  */
-function parseJson(value: unknown): JsonObject {
-  if (value && typeof value === 'object') return value as JsonObject;
-  if (typeof value !== 'string' || !value) return {};
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return parsed && typeof parsed === 'object' ? (parsed as JsonObject) : {};
-  } catch {
-    return {};
-  }
-}
+const parseJson = (value: unknown): JsonObject => parseParams(value) ?? {};
 
-/** Joins the non-blank parts with newlines (undefined and whitespace-only parts are skipped). */
-const joinLines = (...parts: Array<string | undefined>): string =>
-  parts.filter((part) => part && part.trim()).join('\n');
-/** True for an http(s) URL. */
-const isHttpUrl = (url: string) => /^https?:\/\//.test(url);
 /** Order-preserving de-duplication of the http(s) URLs; empty and non-http entries are dropped. */
 const uniqueHttpUrls = (urls: string[]): string[] => [...new Set(urls.filter(isHttpUrl))];
-
-/** Human-readable size ("367 KB", "1.5 MB") for the file fallback text; '' when unknown. */
-function formatBytes(byteCount: number): string {
-  if (!Number.isFinite(byteCount) || byteCount <= 0) return '';
-  if (byteCount < 1024 * 1024) return `${Math.max(1, Math.round(byteCount / 1024))} KB`;
-  return `${(byteCount / 1024 / 1024).toFixed(1)} MB`;
-}
 
 /**
  * Rewrites a JPEG XL photo URL to its JPEG twin; other URLs pass through unchanged.
@@ -112,8 +131,7 @@ export function jxlToJpgUrl(url: string): string {
 }
 
 /** Public sticker image (PNG, or GIF for legacy emoticons) — no Zalo session needed. */
-export const stickerImageUrl = (id: number): string =>
-  `https://zalo-api.zadn.vn/api/emoticon/sticker/webpc?eid=${id}&size=240`;
+export const stickerImageUrl = (id: number): string => `${ZALO_EMOTICON_API}/sticker/webpc?eid=${id}&size=240`;
 
 /**
  * System-message templates ("%1$s pinned message %2$s") filled from highlight names.
@@ -133,6 +151,43 @@ function fillTemplate(params: JsonObject): string {
   return templateText.replace(/%(\d)\$s/g, (_, position: string) => fills[Number(position) - 1] ?? '');
 }
 
+/**
+ * Answer texts of an exported poll row. The export has no documented poll shape, so this
+ * reads the usual places (attachment / params, `options` or `pollOptions`, a JSON array or
+ * string, entries as strings or objects with content / text / name / title).
+ *
+ * @returns the non-empty option texts in order, [] when none are found
+ */
+function pollOptionTexts(attachment: JsonObject, params: JsonObject): string[] {
+  for (const holder of [attachment, params]) {
+    for (const key of ['options', 'pollOptions']) {
+      let list: unknown = holder[key];
+      if (typeof list === 'string') {
+        try {
+          list = JSON.parse(list);
+        } catch {
+          continue;
+        }
+      }
+      if (!Array.isArray(list)) continue;
+      const texts = list
+        .map((entry) =>
+          typeof entry === 'string'
+            ? entry
+            : entry && typeof entry === 'object'
+              ? asText((entry as JsonObject).content) ||
+                asText((entry as JsonObject).text) ||
+                asText((entry as JsonObject).name) ||
+                asText((entry as JsonObject).title)
+              : '',
+        )
+        .filter((text) => text.trim());
+      if (texts.length) return texts;
+    }
+  }
+  return [];
+}
+
 /** Result of rendering one export row: the readable text plus the optional rich parts. */
 type Rendered = {
   body: string;
@@ -142,6 +197,13 @@ type Rendered = {
   media?: ImportMedia;
   linkPreview?: LinkPreview;
 };
+
+/**
+ * Zalo PC msgTypes that are system events, not something a person wrote: -4 (group joins,
+ * leaves, renames) and -1909 (pins). They carry the acting member as fromUid, but showing
+ * them as that person's message is the bug, so the importer posts them as the bot.
+ */
+const SYSTEM_MSG_TYPES = new Set([-4, -1909]);
 
 /**
  * Renders the message body; `notice` marks system/placeholder lines.
@@ -183,29 +245,28 @@ function render(row: ExportRow): Rendered {
           asText(attachment.normalUrl),
         ].map(jxlToJpgUrl),
       );
-      const dims = width && height ? ` ${width}×${height}` : '';
-      return {
-        body: joinLines(`📷 [Ảnh${dims} — không còn trên máy chủ Zalo]`, caption),
-        notice: false,
-        media: { kind: 'image', urls, caption, width, height, size: positiveNumber(params.fileSize) },
+      const media: MediaDescriptor = {
+        kind: 'image',
+        urls,
+        caption,
+        width,
+        height,
+        size: positiveNumber(params.fileSize),
       };
+      return { body: mediaGoneBody(media), notice: false, media };
     }
     case 3: {
       const durationMs = positiveNumber(params.duration);
       const waveform = toMatrixWaveform(params.waveformSamples);
-      const secs = durationMs ? ` ${Math.round(durationMs / 1000)}s` : '';
-      return {
-        body: `🎤 [Tin nhắn thoại${secs} — không còn trên máy chủ Zalo]`,
-        notice: false,
-        media: {
-          kind: 'audio',
-          urls: uniqueHttpUrls([asText(params.m4a), asText(attachment.href)]),
-          filename: 'Voice message.m4a',
-          durationMs,
-          size: positiveNumber(params.fileSize),
-          ...(waveform ? { waveform } : {}),
-        },
+      const media: MediaDescriptor = {
+        kind: 'audio',
+        urls: uniqueHttpUrls([asText(params.m4a), asText(attachment.href)]),
+        filename: 'Voice message.m4a',
+        durationMs,
+        size: positiveNumber(params.fileSize),
+        ...(waveform ? { waveform } : {}),
       };
+      return { body: mediaGoneBody(media), notice: false, media };
     }
     case 4: {
       const id = Number(attachment.id);
@@ -235,30 +296,26 @@ function render(row: ExportRow): Rendered {
     }
     case 18: {
       const durationMs = positiveNumber(attachment.duration) ?? positiveNumber(params.duration);
-      const secs = durationMs ? ` ${Math.round(durationMs / 1000)}s` : '';
-      return {
-        body: joinLines(`🎬 [Video${secs} — không còn trên máy chủ Zalo]`, title),
-        notice: false,
-        media: {
-          kind: 'video',
-          urls: uniqueHttpUrls([asText(attachment.oriUrl), asText(attachment.href)]),
-          filename: 'zalo-video.mp4',
-          caption: title || undefined,
-          width: positiveNumber(params.video_width),
-          height: positiveNumber(params.video_height),
-          durationMs,
-          size: positiveNumber(params.fileSize),
-        },
+      const media: MediaDescriptor = {
+        kind: 'video',
+        urls: uniqueHttpUrls([asText(attachment.oriUrl), asText(attachment.href)]),
+        filename: 'zalo-video.mp4',
+        caption: title || undefined,
+        width: positiveNumber(params.video_width),
+        height: positiveNumber(params.video_height),
+        durationMs,
+        size: positiveNumber(params.fileSize),
       };
+      return { body: mediaGoneBody(media), notice: false, media };
     }
     case 19: {
-      const size = positiveNumber(params.fileSize);
-      const human = size ? ` (${formatBytes(size)})` : '';
-      return {
-        body: `📎 [Tệp] ${title}${human} — không còn trên máy chủ Zalo`,
-        notice: false,
-        media: { kind: 'file', urls: uniqueHttpUrls([asText(attachment.href)]), filename: title || 'zalo-file', size },
+      const media: MediaDescriptor = {
+        kind: 'file',
+        urls: uniqueHttpUrls([asText(attachment.href)]),
+        filename: title || 'zalo-file',
+        size: positiveNumber(params.fileSize),
       };
+      return { body: mediaGoneBody(media), notice: false, media };
     }
     case 6: {
       if (CALL_ACTIONS.has(asText(attachment.action))) {
@@ -288,8 +345,23 @@ function render(row: ExportRow): Rendered {
         },
       };
     }
+    case 26: {
+      // Poll: readable question + numbered options (native poll import is a phase-3 follow-up)
+      const question = title || asText(params.question) || asText(attachment.question) || desc;
+      const options = pollOptionTexts(attachment, params);
+      if (question || options.length) {
+        const lines = options.map((option, index) => `${index + 1}. ${option}`);
+        return { body: joinLines(`📊 [Bình chọn] ${question}`.trimEnd(), ...lines), notice: true };
+      }
+      return { body: fillTemplate(params) || '[Bình chọn]', notice: true };
+    }
+    case 20:
+    case -27:
+      // Recalled / deleted rows that kept an object payload (usually the string placeholder):
+      // the marker only, never the payload, which may still hold the removed message
+      return { body: row.msgType === 20 ? '[Tin nhắn đã thu hồi]' : '[Tin nhắn đã xoá]', notice: true };
     default: {
-      // System rows (-1909 pins, 25 friend cards, 26 polls, 52 zinstant ...) and unknown types
+      // System rows (-1909 pins, 25 friend cards, 52 zinstant ...) and unknown types
       const text = title || fillTemplate(params) || desc || asText(attachment.href);
       return { body: text || `[Tin nhắn Zalo loại ${row.msgType}]`, notice: true };
     }
@@ -300,21 +372,23 @@ function render(row: ExportRow): Rendered {
  * Export row → importable event; null when there is nothing to show (no msgId, no send
  * time, or an empty rendered body). Also resolves the sender, the quote and the mentions.
  *
- * @param threadType decides who sender-less system rows are attributed to (peer in DMs, bot in groups)
- * @param threadId the DM peer's uid, used as the sender of DM system rows
+ * @param threadType decides who other sender-less rows are attributed to (peer in DMs, bot in groups);
+ *   system rows (SYSTEM_MSG_TYPES) are always the bot's
+ * @param threadId the DM peer's uid, used as the sender of sender-less DM rows
  */
 export function renderExportRow(row: ExportRow, threadType: 'user' | 'group', threadId: string): ImportEvent | null {
   if (!row.msgId || !row.sendDttm) return null;
   const { body, notice, action, media, linkPreview } = render(row);
   if (!body.trim()) return null;
 
-  const sender: ImportSender =
-    row.fromUid === '0'
+  const sender: ImportSender = SYSTEM_MSG_TYPES.has(Number(row.msgType))
+    ? { kind: 'bot' } // a system line is the bridge's, whoever acted
+    : row.fromUid === '0'
       ? { kind: 'owner' }
       : row.fromUid
         ? { kind: 'ghost', uid: row.fromUid, name: row.dName || undefined }
         : threadType === 'user'
-          ? { kind: 'ghost', uid: threadId } // DM system rows: attribute to the peer
+          ? { kind: 'ghost', uid: threadId } // other sender-less DM rows: attribute to the peer
           : { kind: 'bot' };
 
   // quote.msg is the quoted text, or an object when the quoted message was media

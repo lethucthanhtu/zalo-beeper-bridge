@@ -21,7 +21,8 @@ Imported messages are rendered exactly like live ones; both use `src/bridge/medi
 | Video / file / voice                        | `m.video` / `m.file` / `m.audio` voice note                          |
 | Link card                                   | text + `com.beeper.linkpreviews` (title, description, thumbnail)     |
 | Call log                                    | Beeper call tile (`com.beeper.action_message`)                       |
-| Location, system rows (pins, joins, polls…) | readable text or notice                                              |
+| Location, system rows (pins, joins, polls…) | readable text or notice; pins and joins are posted by the bridge bot |
+| Poll                                        | notice with the question and numbered options (no live poll)         |
 | Media whose bytes no longer exist anywhere  | a text line, e.g. `📷 [Ảnh 1920×1080 — không còn trên máy chủ Zalo]` |
 
 ## Where media comes from
@@ -39,6 +40,7 @@ In order: the backup copy (if you prepared one), then the Zalo CDN.
 
 ## Limits
 
+- Polls are imported as a text notice, not as a votable Matrix poll (native poll import is planned for a later phase).
 - Only what Zalo PC holds locally can be imported. The more history Zalo PC has, the more ends up in Beeper.
 - The backup's message database adds no extra history if Zalo PC is the machine that made the backup: it holds the same rows.
 - Beeper's batch-send API can only insert before the oldest or after the newest event of a room, never in the middle. That is why the scripts rebuild each chat as a new room.

@@ -2,6 +2,7 @@
 // Creation is serialized per-thread with an in-flight promise map so concurrent
 // messages from a new thread cannot provision duplicate rooms.
 import type { Bridge } from 'matrix-appservice-bridge';
+import { ROOM_ENCRYPTION_ALGORITHM, type RoomEncryption } from '../matrix/crypto.ts';
 import { tagPortalNetwork, type NetworkBranding } from '../matrix/network-branding.ts';
 import type { MappingStore, PortalRow } from './mapping-store.ts';
 import { ownerIntent } from './owner-intent.ts';
@@ -10,7 +11,7 @@ import type { ZaloThreadType } from '../zalo/types.ts';
 import { errorMessage } from '../error-message.ts';
 
 /** What PortalManager needs to know about a thread to find or create its portal. */
-export type PortalContext = {
+type PortalContext = {
   threadId: string;
   threadType: ZaloThreadType;
   /** ghost that triggers creation (DM peer / first group speaker) */
@@ -18,6 +19,22 @@ export type PortalContext = {
   senderName?: string;
   /** resolver for group display names (zca-js getGroupInfo behind the facade) */
   resolveGroupName?: (threadId: string) => Promise<string | null>;
+};
+
+/**
+ * Lazy access to the room encryption tracker: it only exists once the bot crypto device is
+ * up, which happens after the PortalManager is built. `undefined` = portals stay plaintext.
+ */
+type PortalEncryption = () => Pick<RoomEncryption, 'markEncrypted' | 'isEncrypted'> | undefined;
+
+/** Pause between rooms in {@link PortalManager.encryptExistingPortals} (avoids a burst of state events). */
+const UPGRADE_PACE_MS = 300;
+
+/** `m.room.encryption` initial state that makes a new portal end-to-end encrypted. */
+const ENCRYPTION_STATE = {
+  type: 'm.room.encryption',
+  state_key: '',
+  content: { algorithm: ROOM_ENCRYPTION_ALGORITHM },
 };
 
 /**
@@ -31,12 +48,15 @@ export class PortalManager {
   private readonly puppets: PuppetRegistry;
   private readonly ownerUserId: string;
   private readonly branding: NetworkBranding;
+  private readonly encryption: PortalEncryption;
   /** threadId → portal creation still in progress (dedups concurrent creation) */
   private readonly inFlight = new Map<string, Promise<PortalRow>>();
   /** roomIds where the owner's auto-join was ensured this run */
   private readonly ownerJoined = new Set<string>();
   /** "roomId|ghostMxid" pairs whose join + room profile were ensured this run */
   private readonly ghostJoined = new Set<string>();
+  /** DM roomIds the bridge bot is known to be in this run (see ensureBotInRoom) */
+  private readonly botJoined = new Set<string>();
 
   /**
    * @param bridge Appservice bridge (bot + ghost/owner Intents).
@@ -44,6 +64,7 @@ export class PortalManager {
    * @param puppets Ghost registry (DM rooms are created by the peer's ghost).
    * @param ownerUserId MXID of the owner, invited to and auto-joined into every portal.
    * @param branding Network branding emitted as room state on every portal.
+   * @param encryption Resolves the room encryption tracker; new portals are encrypted while it returns one.
    */
   constructor(
     bridge: Bridge,
@@ -51,12 +72,14 @@ export class PortalManager {
     puppets: PuppetRegistry,
     ownerUserId: string,
     branding: NetworkBranding,
+    encryption: PortalEncryption = () => undefined,
   ) {
     this.bridge = bridge;
     this.store = store;
     this.puppets = puppets;
     this.ownerUserId = ownerUserId;
     this.branding = branding;
+    this.encryption = encryption;
   }
 
   /**
@@ -124,6 +147,41 @@ export class PortalManager {
         portal.account_id,
       );
     }
+  }
+
+  /**
+   * In-place E2EE upgrade: turns encryption on in every existing plaintext portal, so
+   * messages from now on are end-to-end encrypted while the older history stays
+   * plaintext in the same room. DMs get the bot in first (it encrypts for the ghost
+   * and the owner), then the room creator sends `m.room.encryption`: the ghost for a
+   * DM, the bot for a group. A room that fails is logged and skipped (the next start
+   * retries it); a room that is already encrypted is left alone.
+   * @param paceMs Pause between upgraded rooms.
+   * @returns Number of rooms upgraded.
+   */
+  async encryptExistingPortals(paceMs = UPGRADE_PACE_MS): Promise<number> {
+    const rooms = this.encryption();
+    if (!rooms) return 0;
+    let upgraded = 0;
+    let failed = 0;
+    for (const portal of this.store.getAllPortals()) {
+      try {
+        // The bot must be in the room before the tracker reads its state, or it caches "plain"
+        if (portal.thread_type === 'user') await this.ensureBotInRoom(portal.room_id, portal.thread_id);
+        if (await rooms.isEncrypted(portal.room_id)) continue;
+        const intent =
+          portal.thread_type === 'user' ? this.puppets.intentFor(portal.thread_id) : this.bridge.getIntent();
+        await intent.sendStateEvent(portal.room_id, ENCRYPTION_STATE.type, '', ENCRYPTION_STATE.content);
+        await rooms.markEncrypted(portal.room_id);
+        upgraded++;
+        if (paceMs > 0) await new Promise((resolve) => setTimeout(resolve, paceMs));
+      } catch (err) {
+        failed++;
+        console.warn(`[bridge] encryption upgrade of ${portal.room_id} failed:`, errorMessage(err));
+      }
+    }
+    if (upgraded || failed) console.log(`[bridge] encryption upgrade: ${upgraded} room(s) encrypted, ${failed} failed`);
+    return upgraded;
   }
 
   /**
@@ -219,10 +277,14 @@ export class PortalManager {
   /**
    * Creates the Matrix room for a thread (not persisted). DMs are created by the
    * peer's ghost as a direct chat; groups by the bot, named from `resolveGroupName`
-   * or "Zalo group <last 6 id digits>". The owner is invited in both cases.
+   * or "Zalo group <last 6 id digits>". The owner is invited in both cases. With
+   * encryption on, the room is created encrypted and the bot is in it (it
+   * encrypts for the ghosts and the double-puppeted owner).
    * @returns The portal row describing the new room.
    */
   private async provisionRoom(ctx: PortalContext): Promise<PortalRow> {
+    const rooms = this.encryption();
+    const initialState = rooms ? { initial_state: [ENCRYPTION_STATE] } : {};
     let row: PortalRow;
     if (ctx.threadType === 'user') {
       // DM portal: created BY the ghost so Beeper renders it as a direct chat
@@ -234,8 +296,19 @@ export class PortalManager {
           is_direct: true,
           preset: 'trusted_private_chat',
           name: ctx.senderName,
+          ...initialState,
         },
       });
+      if (rooms) {
+        // Beeper hides service members; the bot has to be in the room to encrypt for the ghost
+        const botUserId = this.bridge.getBot().getUserId();
+        await ghostIntent.sendStateEvent(room_id, 'io.element.functional_members', '', {
+          service_members: [botUserId],
+        });
+        await ghostIntent.invite(room_id, botUserId);
+        await this.bridge.getIntent().join(room_id);
+        await rooms.markEncrypted(room_id);
+      }
       row = { thread_id: ctx.threadId, thread_type: 'user', room_id, name: ctx.senderName ?? null };
     } else {
       const groupName =
@@ -245,11 +318,36 @@ export class PortalManager {
           invite: [this.ownerUserId],
           preset: 'private_chat',
           name: groupName,
+          ...initialState,
         },
       });
+      // the bot created the group, so it is already in the room
+      await rooms?.markEncrypted(room_id);
       row = { thread_id: ctx.threadId, thread_type: 'group', room_id, name: groupName };
     }
     return row;
+  }
+
+  /**
+   * Makes sure the bridge bot is a member of a DM portal, so it can post system lines
+   * (`m.notice`). DMs are created by the peer's ghost and only encrypted ones put the
+   * bot in; older plaintext DMs do not have it. The ghost (the room creator, PL 100)
+   * marks the bot a service member, invites it, and the bot joins. Cached per room.
+   * @throws When the invite or the join fails (the caller falls back to the ghost).
+   */
+  async ensureBotInRoom(roomId: string, peerUid: string): Promise<void> {
+    if (this.botJoined.has(roomId)) return;
+    const botUserId = this.bridge.getBot().getUserId();
+    const ghostIntent = this.puppets.intentFor(peerUid);
+    await ghostIntent
+      .sendStateEvent(roomId, 'io.element.functional_members', '', { service_members: [botUserId] })
+      .catch((err: unknown) => console.warn(`[bridge] functional_members for ${roomId} failed:`, errorMessage(err)));
+    await ghostIntent.invite(roomId, botUserId).catch((err: unknown) => {
+      // already in the room is fine; anything else shows up as the join failing below
+      console.warn(`[bridge] invite bot into ${roomId} failed:`, errorMessage(err));
+    });
+    await this.bridge.getIntent().join(roomId);
+    this.botJoined.add(roomId);
   }
 
   /**

@@ -8,12 +8,15 @@
 // zca-js 2.3.0 handles cmd 551 itself ([501, 551].includes(cmd)), so the rewrite is
 // now redundant but harmless; it stays until 2.3.0 is proven on a live account.
 // Unknown cmds are logged once each so future protocol drift is visible.
+import { unzipSync } from 'node:zlib';
 import { errorMessage } from '../error-message.ts';
 
 // version(u8) | cmd(u16 LE) | subCmd(i8) — mirrors zca-js listen.js getHeader
 const HEADER_BYTES = 4;
 const E2EE_DM_CMD = 551;
 const DM_CMD = 501;
+// Control pushes (upload file_done, group events …)
+const CONTROL_CMD = 601;
 // Every cmd zca-js 2.3.0 listen.js handles (551 included)
 const KNOWN_CMDS = new Set([1, 2, 501, 502, 510, 511, 521, 522, 551, 601, 602, 610, 611, 612, 3000]);
 
@@ -90,10 +93,10 @@ async function decodePayload(
     );
     payloadBytes = Buffer.from(await crypto.subtle.decrypt(algorithm, key, bytes.slice(32)));
   }
-  if (body.encrypt === 2 || body.encrypt === 3) {
-    const { gunzipSync } = await import('node:zlib');
+  // zca-js inflates encrypt-2 payloads (pako, zlib format); unzip also takes gzip
+  if (body.encrypt === 2) {
     try {
-      payloadBytes = gunzipSync(payloadBytes);
+      payloadBytes = unzipSync(payloadBytes);
     } catch {
       // not compressed
     }
@@ -149,10 +152,69 @@ export function installFrameTap(listener: unknown): void {
           .catch((err: unknown) => console.log(`[zalo:ws] cmd ${header.cmd} undecodable: ${errorMessage(err)}`));
       }
     }
+    if (header?.version === 1 && header.cmd === CONTROL_CMD && header.subCmd === 0) {
+      const cipherKey = (listener as { cipherKey?: string }).cipherKey;
+      void (async () =>
+        JSON.parse(data.subarray(HEADER_BYTES).toString('utf8')) as { data?: unknown; encrypt?: unknown })()
+        .then((body) => decodePayload(body, cipherKey))
+        .then(recordFileDone)
+        .catch((err: unknown) => console.log(`[zalo:ws] control frame undecodable: ${errorMessage(err)}`));
+    }
     if (header?.cmd === E2EE_DM_CMD && !reportedCmds.has(E2EE_DM_CMD)) {
       reportedCmds.add(E2EE_DM_CMD);
       console.log('[zalo] E2EE DM push (cmd 551) seen — rerouting to the DM handler');
     }
     return original.call(ws, { ...event, data: rerouteFrame(data) });
   };
+}
+
+// Upload completion (`file_done` control, cmd 601). zca-js hands upload callbacks only
+// `data.url`; a voice upload reports its URLs as `data.aac` / `data.amr`, so the tap
+// keeps the whole `data` of each recent file_done for waitForFileDone.
+const FILE_DONE_TTL_MS = 120_000;
+type FileDoneData = Record<string, unknown>;
+const recentFileDone = new Map<string, { data: FileDoneData; at: number }>();
+const fileDoneWaiters = new Map<string, (data: FileDoneData) => void>();
+
+/** Stores (or hands to a waiter) the data of every file_done control in a decoded cmd-601 payload. */
+export function recordFileDone(decoded: unknown): void {
+  const controls = (decoded as { data?: { controls?: unknown } } | null)?.data?.controls;
+  if (!Array.isArray(controls)) return;
+  const now = Date.now();
+  for (const [fileId, entry] of recentFileDone) if (now - entry.at > FILE_DONE_TTL_MS) recentFileDone.delete(fileId);
+  for (const control of controls as { content?: { act_type?: unknown; fileId?: unknown; data?: unknown } }[]) {
+    const content = control?.content;
+    if (content?.act_type !== 'file_done' || content.fileId == null) continue;
+    const fileId = String(content.fileId);
+    const data = content.data && typeof content.data === 'object' ? (content.data as FileDoneData) : {};
+    const waiter = fileDoneWaiters.get(fileId);
+    if (waiter) {
+      fileDoneWaiters.delete(fileId);
+      waiter(data);
+    } else recentFileDone.set(fileId, { data, at: now });
+  }
+}
+
+/**
+ * Resolves with the `data` of the file_done control for an upload (already seen or still
+ * to come). Needs installFrameTap on the live listener.
+ *
+ * @throws after `timeoutMs` without a file_done for `fileId`
+ */
+export function waitForFileDone(fileId: string, timeoutMs: number): Promise<FileDoneData> {
+  const seen = recentFileDone.get(fileId);
+  if (seen) {
+    recentFileDone.delete(fileId);
+    return Promise.resolve(seen.data);
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      fileDoneWaiters.delete(fileId);
+      reject(new Error(`no file_done for upload ${fileId} within ${timeoutMs} ms`));
+    }, timeoutMs);
+    fileDoneWaiters.set(fileId, (data) => {
+      clearTimeout(timer);
+      resolve(data);
+    });
+  });
 }

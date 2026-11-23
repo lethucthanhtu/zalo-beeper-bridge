@@ -4,6 +4,10 @@
 
 The bridge runs entirely on your own machine. Message content is sent only to Zalo and to your Beeper account. There is no telemetry and no third-party service.
 
+## Encryption
+
+With `encryption.enabled`, portals are end-to-bridge encrypted: messages are encrypted between your Beeper devices and the bridge bot's crypto device, so Beeper's servers store only ciphertext. The bridge itself decrypts them to talk to Zalo, and Zalo stores messages in its own way, so this does not make the chat end-to-end encrypted with the other person. Keep the `crypto/` folder with your backups: it holds the bot's keys, and without it the bot starts over as a new device.
+
 ## Risk to your Zalo account
 
 The bridge uses [zca-js](https://github.com/RFS-ADRENO/zca-js), an **unofficial** client of the Zalo Web protocol. Zalo does not support third-party clients and may lock or ban accounts that use them. The bridge reduces the risk but cannot remove it:
@@ -22,6 +26,7 @@ Only use the bridge with an account you can afford to lose access to for a while
 | Appservice tokens                       | `registration.yaml`                             | File permissions                                             |
 | Beeper login of `bbctl`                 | `bbctl-config.json` / `/data/bbctl/config.json` | File permissions (`0600` in the container)                   |
 | Room, ghost and message ids             | `bridge.db`                                     | File permissions                                             |
+| Bot crypto keys and device tokens       | `crypto/`, `crypto-import/`                     | File permissions (`0700` folder, `0600` device file)         |
 
 All of these are gitignored. Never commit or share them, and keep backups of the data volume encrypted. Anyone holding the session file **and** its key can use your Zalo account.
 

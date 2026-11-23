@@ -48,6 +48,14 @@ node scripts/zalo-pc/backup-media.mjs work/backup/<yourZaloUid>/ZaloDownloads <y
 
 `<yourZaloUid>` is the top-level folder inside the extracted backup. `backup-media.mjs` writes `work/media/<msgId>.<ext>` and `work/media/media-index.json`. Files it cannot read (for example Intune-encrypted attachments) are skipped and fall back to a text line.
 
+Without a backup, the live Zalo PC folder works too. It has no message database, so pass the export files from `export-cdp.mjs` (one `.ndjson` file, or the whole folder) as a 4th argument:
+
+```bash
+node scripts/zalo-pc/backup-media.mjs "<Zalo Data>/media/<yourZaloUid>/ZaloDownloads" <yourZaloUid> work/media work/export/<chatKey>.ndjson
+```
+
+Only media Zalo PC has downloaded is there; the rest still goes to the CDN or the text fallback.
+
 Copy the folder into the container:
 
 ```bash
@@ -59,8 +67,12 @@ tar -C work/media -cf - . | podman exec -i zalo-beeper-bridge sh -c 'mkdir -p /d
 `scripts/zalo-pc/migrate-all.sh` works chat by chat: a fresh export of the chat from Zalo PC, then the importer with `--rebuild --remove-old` inside the container.
 
 - It waits while Beeper or Zalo PC is unreachable.
-- It records `OK <key>` or `FAIL <key>` in `<workDir>/done.txt` and skips chats that are already OK on a re-run.
+- It records `OK <key>`, `OKMEDIA <key>` or `FAIL <key>` in `<workDir>/done.txt` and skips OK and OKMEDIA chats on a re-run.
+- `OKMEDIA` means every message reached the new room, but some media could not be downloaded (for example a dead Zalo CDN host with no copy in the old room) or a live message could not be carried over. Running the chat again does not bring that media back.
+- A rebuild with `--media-dir` also replaces the live `[Zalo photo could not be bridged …]` notices with the real file wherever Zalo PC has a copy. The bot command [`media-failures`](../guide/bot-commands#media-failures) lists the rooms that have such notices.
 - A failed chat keeps its old room and can simply be run again.
+- The script does not pass `--include-encrypted`, so it skips chats whose room is end-to-end encrypted. Rebuild those with the importer directly and without `--remove-old`; then check the log for `old-room:undecryptable` and WARNING lines before you delete the old room with `--retire`. See [Completeness audit](importer-cli#completeness-audit).
+- `BASELINE_DB` must name a copy of `bridge.db` inside the container, taken before the run (for example with `sqlite3 bridge.db ".backup bridge.db.bak-pre-migrate"`). The importer checks every old-room message against it before it deletes the old room.
 
 ```bash
 # order.txt: one chat key per line, "g<groupId>" for groups, the peer uid for DMs.
@@ -68,7 +80,8 @@ tar -C work/media -cf - . | podman exec -i zalo-beeper-bridge sh -c 'mkdir -p /d
 node scripts/zalo-pc/export-cdp.mjs work/export
 ls work/export/*.ndjson | xargs -n1 basename | sed 's/\.ndjson$//' > work/order.txt   # reorder as you like
 
-scripts/zalo-pc/migrate-all.sh work work/order.txt <yourZaloUid> /data/import-media
+BASELINE_DB=/data/bridge.db.bak-pre-migrate \
+  scripts/zalo-pc/migrate-all.sh work work/order.txt <yourZaloUid> /data/import-media
 tail -f work/run.log
 ```
 

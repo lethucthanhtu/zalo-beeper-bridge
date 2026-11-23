@@ -52,4 +52,33 @@ describe('EchoSuppressor', () => {
     expect(echo.consumeImage('t1')).toBe(true);
     expect(echo.consumeImage('t1')).toBe(false);
   });
+
+  it('swallows the self poll echo of a poll created from Beeper exactly once, per thread', () => {
+    const echo = new EchoSuppressor();
+    echo.expectPoll('g1');
+    expect(echo.consumePoll('g2')).toBe(false);
+    expect(echo.consumePoll('g1')).toBe(true);
+    expect(echo.consumePoll('g1')).toBe(false);
+  });
+
+  it('disarms a failed poll creation and keeps poll guards apart from text guards', () => {
+    const echo = new EchoSuppressor();
+    echo.expectPoll('g1');
+    echo.cancelPoll('g1');
+    expect(echo.consumePoll('g1')).toBe(false);
+    echo.expectPoll('g1');
+    expect(echo.consume('g1', ' poll-create')).toBe(false);
+    expect(echo.consumePoll('g1')).toBe(true);
+  });
+
+  it('never lets message text consume an internal guard', () => {
+    const echo = new EchoSuppressor();
+    echo.expectPoll('g1');
+    echo.expectReactionRemoval('g1', 'm1');
+    for (const text of ['poll-create', 'reaction-removal:m1', ' poll-create', '\\0poll-create']) {
+      expect(echo.consume('g1', text)).toBe(false);
+    }
+    expect(echo.consumePoll('g1')).toBe(true);
+    expect(echo.consumeReactionRemoval('g1', 'm1')).toBe(true);
+  });
 });

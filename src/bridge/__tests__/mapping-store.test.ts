@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
 import { MappingStore } from '../mapping-store.ts';
 
 let tempDir: string;
@@ -40,6 +41,42 @@ describe('MappingStore', () => {
     expect(store.getReactionByEventId('$1')).toBeNull();
     store.deletePortal('t1');
     expect(store.getReactionByEventId('$2')).toBeNull();
+  });
+
+  it('maps a poll to its start event, options and last known votes, and drops it with the room', () => {
+    store.insertPortal({ thread_id: 'g1', thread_type: 'group', room_id: '!g:x', name: null });
+    const options = [
+      { optionId: 11, answerId: 'o11', content: 'Pho' },
+      { optionId: 12, answerId: 'o12', content: 'Bun' },
+    ];
+    store.recordPoll({ pollId: 4242, roomId: '!g:x', eventId: '$poll', creatorId: 'u2', options, multi: true });
+    store.recordPoll({ pollId: 4242, roomId: '!g:x', eventId: '$ignored', creatorId: 'u9', options: [], multi: false });
+    expect(store.getPollById(4242)).toEqual({
+      pollId: 4242,
+      roomId: '!g:x',
+      eventId: '$poll',
+      creatorId: 'u2',
+      options,
+      multi: true,
+      closed: false,
+      votes: {},
+    });
+    expect(store.getPollByEventId('$poll')?.pollId).toBe(4242);
+    expect(store.getPollByEventId('$nope')).toBeNull();
+
+    store.setPollVotes(4242, { u3: [11], me: [] });
+    expect(store.getPollById(4242)?.votes).toEqual({ u3: [11], me: [] });
+    store.closePoll(4242);
+    expect(store.getPollById(4242)?.closed).toBe(true);
+
+    store.deletePortal('g1');
+    expect(store.getPollById(4242)).toBeNull();
+  });
+
+  it('drops the polls of an abandoned room', () => {
+    store.recordPoll({ pollId: 1, roomId: '!old:x', eventId: '$p', creatorId: null, options: [], multi: false });
+    store.deleteRoomMessages('!old:x');
+    expect(store.getPollById(1)).toBeNull();
   });
 
   it('persists portals across reopen (restart survival)', () => {
@@ -119,6 +156,114 @@ describe('MappingStore', () => {
   });
 });
 
+describe('MappingStore media failure ledger (schema v10)', () => {
+  it('lists rooms with failure notices until a rebuild repoints the message', () => {
+    store.insertPortal({ thread_id: 't1', thread_type: 'user', room_id: '!r:x', name: 'A' });
+    store.recordMessage('p1', '!r:x', '$n1', 'inbound');
+    store.recordMessage('p2', '!r:x', '$n2', 'inbound');
+    store.recordMediaFailure('p1', '!r:x', '$n1', 'photo', 'f1.zdn.vn: HTTP 400');
+    store.recordMediaFailure('p2', '!r:x', '$n2', 'file', 'f1.zdn.vn: HTTP 400');
+    expect(store.listOpenMediaFailures()).toEqual([
+      { roomId: '!r:x', count: 2, lastTs: expect.any(Number), kinds: expect.arrayContaining(['photo', 'file']) },
+    ]);
+
+    // the importer rebuild re-renders p1 as a real image in a new room
+    store.repointPortal({ thread_id: 't1', thread_type: 'user', room_id: '!new:x', name: null }, [
+      { msgId: 'p1', eventId: '$img', direction: 'inbound', cliMsgId: null, msgType: 'chat.photo' },
+    ]);
+    expect(store.listOpenMediaFailures()).toEqual([
+      { roomId: '!r:x', count: 1, lastTs: expect.any(Number), kinds: ['file'] },
+    ]);
+  });
+
+  it('forgets the failures of a deleted room', () => {
+    store.recordMessage('p1', '!old:x', '$n1', 'inbound');
+    store.recordMediaFailure('p1', '!old:x', '$n1', 'photo', 'x');
+    store.deleteRoomMessages('!old:x');
+    store.recordMessage('p1', '!old:x', '$n1', 'inbound'); // even if the mapping came back
+    expect(store.listOpenMediaFailures()).toEqual([]);
+  });
+
+  it('looks up, lists and resolves an open failure for the repair queue', () => {
+    store.insertPortal({ thread_id: 'g1', thread_type: 'group', room_id: '!g:x', name: 'G' });
+    store.recordMessage('p1', '!g:x', '$n1', 'inbound');
+    store.recordMediaFailure('p1', '!g:x', '$n1', 'video', 'x');
+    expect(store.getOpenMediaFailure('p1')).toEqual({ roomId: '!g:x', eventId: '$n1', kind: 'video' });
+    expect(store.listOpenMediaFailuresSince(0)).toEqual([
+      { zaloMsgId: 'p1', threadId: 'g1', threadType: 'group', ts: expect.any(Number) },
+    ]);
+    expect(store.listOpenMediaFailuresSince(Date.now() + 60_000)).toEqual([]);
+
+    store.resolveMediaFailure('p1', '$video');
+    expect(store.getEventIdByMsgId('p1')).toBe('$video');
+    expect(store.getOpenMediaFailure('p1')).toBeNull();
+    expect(store.listOpenMediaFailuresSince(0)).toEqual([]);
+  });
+
+  it('treats a failure whose message a rebuild repointed as closed', () => {
+    store.insertPortal({ thread_id: 't1', thread_type: 'user', room_id: '!r:x', name: 'A' });
+    store.recordMessage('p1', '!r:x', '$n1', 'inbound');
+    store.recordMediaFailure('p1', '!r:x', '$n1', 'photo', 'x');
+    store.repointPortal({ thread_id: 't1', thread_type: 'user', room_id: '!new:x', name: null }, [
+      { msgId: 'p1', eventId: '$img', direction: 'inbound', cliMsgId: null, msgType: 'chat.photo' },
+    ]);
+    expect(store.getOpenMediaFailure('p1')).toBeNull();
+    expect(store.listOpenMediaFailuresSince(0)).toEqual([]);
+  });
+});
+
+describe('MappingStore sticker uploads (zalo_file, schema v11)', () => {
+  const plain = { uploaded: { url: 'mxc://hs/plain' }, mimetype: 'image/png', size: 10, w: 120, h: 120 };
+  const encrypted = {
+    uploaded: { file: { url: 'mxc://hs/enc', v: 'v2' } } as never,
+    mimetype: 'image/webp',
+    size: 20,
+  };
+
+  it('keeps one upload per sticker and mode, across reopen', () => {
+    store.putStickerMedia(42, false, plain);
+    store.putStickerMedia('42', true, encrypted);
+    expect(store.getStickerMedia(42, false)).toEqual(plain);
+    expect(store.getStickerMedia(42, true)).toStrictEqual(encrypted);
+    expect(store.getStickerMedia(43, false)).toBeNull();
+
+    store.close();
+    store = new MappingStore(dbPath);
+    expect(store.getStickerMedia('42', false)).toEqual(plain);
+  });
+
+  it('replaces an upload and forgets a sticker', () => {
+    store.putStickerMedia(42, false, plain);
+    store.putStickerMedia(42, false, { ...plain, size: 11 });
+    expect(store.getStickerMedia(42, false)?.size).toBe(11);
+    store.putStickerMedia(42, true, encrypted);
+    store.deleteStickerMedia(42);
+    expect(store.getStickerMedia(42, false)).toBeNull();
+    expect(store.getStickerMedia(42, true)).toBeNull();
+  });
+
+  it('stores rows like mautrix-telegram telegram_file: one id per mode, key only in decryption_info', () => {
+    store.putStickerMedia(42, false, plain);
+    store.putStickerMedia(42, true, encrypted);
+    store.close();
+    const db = new Database(dbPath, { readonly: true });
+    const rows = db.prepare('SELECT id, mxc, decryption_info FROM zalo_file ORDER BY id').all();
+    db.close();
+    store = new MappingStore(dbPath);
+    expect(rows).toEqual([
+      { id: 'sticker-42', mxc: 'mxc://hs/plain', decryption_info: null },
+      { id: 'sticker-42-encrypted', mxc: 'mxc://hs/enc', decryption_info: expect.stringContaining('"v":"v2"') },
+    ]);
+  });
+
+  it('ignores an upload whose form does not match the mode', () => {
+    store.putStickerMedia(42, true, plain);
+    store.putStickerMedia(42, false, encrypted);
+    expect(store.getStickerMedia(42, true)).toBeNull();
+    expect(store.getStickerMedia(42, false)).toBeNull();
+  });
+});
+
 describe('MappingStore accounts (multi-account groundwork, schema v7)', () => {
   it('upgrades a v6 database without touching existing rows, then files them under the first account', async () => {
     store.close();
@@ -147,6 +292,7 @@ describe('MappingStore accounts (multi-account groundwork, schema v7)', () => {
     expect(store.getEventIdByMsgId('m1')).toBe('$e1'); // lookups unchanged
     expect(store.listAccounts()).toEqual([]);
     expect(store.currentAccountId).toBeNull();
+    expect(store.getPollById(1)).toBeNull(); // the poll table was added by the upgrade
 
     expect(store.bindAccount('111', 'zalo-creds.session.json')).toEqual({ portals: 1, messages: 1 });
     expect(store.getPortalByThread('t1')?.account_id).toBe('111');

@@ -1,7 +1,9 @@
 // SQLite persistence: portal rooms, ghost puppets, message dedup/echo keys.
 // better-sqlite3 sync API — single-user bridge volume makes async pooling YAGNI.
 import Database from 'better-sqlite3';
+import type { EncryptedFile } from '@vector-im/matrix-bot-sdk';
 import type { ZaloThreadType } from '../zalo/types.ts';
+import type { Uploaded } from './media-content.ts';
 
 /** One `portal` row: the Matrix room a Zalo thread (DM or group) is bridged into. */
 export type PortalRow = {
@@ -13,6 +15,21 @@ export type PortalRow = {
   account_id?: string | null;
 };
 
+/** Open media failures of one room (see `MappingStore.listOpenMediaFailures`). */
+export type OpenMediaFailures = { roomId: string; count: number; lastTs: number; kinds: string[] };
+
+/**
+ * A sticker image already in the Matrix content repo, reusable for every later send of the
+ * same Zalo sticker. An encrypted entry carries its key; anyone who received the sticker once
+ * could already decrypt it, and Zalo stickers are public images.
+ */
+export type StickerMedia = { uploaded: Uploaded; mimetype: string; size: number; w?: number; h?: number };
+
+/** `zalo_file` id of a sticker image: `sticker-<id>`, plus `-encrypted` for the encrypted upload. */
+function stickerFileId(stickerId: number | string, encrypted: boolean): string {
+  return `sticker-${stickerId}${encrypted ? '-encrypted' : ''}`;
+}
+
 /** One `account` row: a Zalo account this bridge has logged in to. */
 export type AccountRow = {
   zalo_uid: string;
@@ -22,7 +39,7 @@ export type AccountRow = {
 };
 
 /** Which way a message was bridged: Zalo → Matrix ('inbound') or Matrix → Zalo ('outbound'). */
-export type MessageDirection = 'inbound' | 'outbound';
+type MessageDirection = 'inbound' | 'outbound';
 
 /** One bridged reaction: a Matrix m.reaction event ↔ a Zalo reaction on a bridged message. */
 export type ReactionRow = {
@@ -36,8 +53,38 @@ export type ReactionRow = {
   zalo_icon: string;
 };
 
+/** One poll option: the Zalo option id ↔ the MSC3381 answer id used in Matrix poll events. */
+type PollOptionMapping = { optionId: number; answerId: string; content: string };
+
+/** One bridged poll: a Zalo group poll ↔ the Matrix `poll.start` event that renders it. */
+export type PollRow = {
+  pollId: number;
+  roomId: string;
+  /** event_id of the poll.start event */
+  eventId: string;
+  /** Zalo uid of the creator (null when unknown) */
+  creatorId: string | null;
+  options: PollOptionMapping[];
+  /** more than one option may be picked (max_selections > 1) */
+  multi: boolean;
+  closed: boolean;
+  /** last bridged vote of each voter (Zalo uid → picked option ids), to diff the next update */
+  votes: Record<string, number[]>;
+};
+
+type PollDbRow = {
+  poll_id: number;
+  room_id: string;
+  event_id: string;
+  creator_id: string | null;
+  options_json: string;
+  multi: number;
+  closed: number;
+  votes_json: string;
+};
+
 /** Target `PRAGMA user_version`; bump it together with a new step in `migrate()`. */
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 11;
 
 /**
  * Synchronous SQLite-backed store for everything the bridge must remember across
@@ -59,6 +106,9 @@ export class MappingStore {
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    // The bridge and the history importer share the file: wait for the other writer instead
+    // of failing at once with SQLITE_BUSY
+    this.db.pragma('busy_timeout = 5000');
     this.migrate();
   }
 
@@ -161,6 +211,56 @@ export class MappingStore {
             ts            INTEGER NOT NULL
           );
           CREATE INDEX IF NOT EXISTS reaction_target ON reaction(target_msg_id, sender_id);
+        `);
+        }
+        // Bridged group polls: pollId ↔ poll.start event, optionId ↔ answer id, last known votes
+        if (current < 9) {
+          this.db.exec(`
+          CREATE TABLE IF NOT EXISTS poll (
+            poll_id      INTEGER PRIMARY KEY,
+            room_id      TEXT NOT NULL,
+            event_id     TEXT NOT NULL UNIQUE,
+            creator_id   TEXT,
+            options_json TEXT NOT NULL,
+            multi        INTEGER NOT NULL DEFAULT 0,
+            closed       INTEGER NOT NULL DEFAULT 0,
+            votes_json   TEXT NOT NULL DEFAULT '{}'
+          );
+          CREATE INDEX IF NOT EXISTS poll_room ON poll(room_id);
+        `);
+        }
+        // Live photos / media that reached Matrix only as a "could not be bridged" notice
+        if (current < 10) {
+          this.db.exec(`
+          CREATE TABLE IF NOT EXISTS media_failure (
+            zalo_msg_id TEXT PRIMARY KEY,
+            room_id     TEXT NOT NULL,
+            event_id    TEXT,
+            kind        TEXT NOT NULL,
+            error       TEXT,
+            ts          INTEGER NOT NULL,
+            account_id  TEXT
+          );
+          CREATE INDEX IF NOT EXISTS media_failure_room ON media_failure(room_id);
+        `);
+        }
+        // Reusable uploads of Zalo files (sticker images), shared by the live bridge and the
+        // importer and kept across restarts. Same shape as mautrix-telegram's `telegram_file`:
+        // the id names the Zalo file plus `-encrypted` for an encrypted upload, whose key is in
+        // decryption_info, so each file is uploaded once per mode instead of once per send
+        if (current < 11) {
+          this.db.exec(`
+          CREATE TABLE IF NOT EXISTS zalo_file (
+            id              TEXT PRIMARY KEY,
+            mxc             TEXT NOT NULL,
+            mime_type       TEXT,
+            size            INTEGER,
+            width           INTEGER,
+            height          INTEGER,
+            timestamp       INTEGER,
+            decryption_info TEXT
+          );
+          CREATE INDEX IF NOT EXISTS zalo_file_mxc_idx ON zalo_file(mxc);
         `);
         }
         this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -334,10 +434,11 @@ export class MappingStore {
     direction: MessageDirection;
     cliMsgId: string | null;
     msgType: string | null;
+    ts: number;
   }> {
     return this.db
       .prepare(
-        "SELECT zalo_msg_id AS msgId, event_id AS eventId, direction, cli_msg_id AS cliMsgId, msg_type AS msgType FROM message WHERE room_id = ? AND zalo_msg_id NOT LIKE 'evt:%' ORDER BY ts, rowid",
+        "SELECT zalo_msg_id AS msgId, event_id AS eventId, direction, cli_msg_id AS cliMsgId, msg_type AS msgType, ts FROM message WHERE room_id = ? AND zalo_msg_id NOT LIKE 'evt:%' ORDER BY ts, rowid",
       )
       .all(roomId) as Array<{
       msgId: string;
@@ -345,6 +446,7 @@ export class MappingStore {
       direction: MessageDirection;
       cliMsgId: string | null;
       msgType: string | null;
+      ts: number;
     }>;
   }
 
@@ -398,7 +500,159 @@ export class MappingStore {
   deleteRoomMessages(roomId: string): number {
     if (this.isPortalRoom(roomId)) throw new Error(`refusing to drop messages of live portal room ${roomId}`);
     this.db.prepare('DELETE FROM reaction WHERE room_id = ?').run(roomId);
+    this.db.prepare('DELETE FROM poll WHERE room_id = ?').run(roomId);
+    this.db.prepare('DELETE FROM media_failure WHERE room_id = ?').run(roomId);
     return this.db.prepare('DELETE FROM message WHERE room_id = ?').run(roomId).changes;
+  }
+
+  /**
+   * The stored upload of a sticker for plain or encrypted rooms, or null when it was never
+   * uploaded in that mode (or the row is unreadable).
+   */
+  getStickerMedia(stickerId: number | string, encrypted: boolean): StickerMedia | null {
+    const row = this.db
+      .prepare('SELECT mxc, mime_type, size, width, height, decryption_info FROM zalo_file WHERE id = ?')
+      .get(stickerFileId(stickerId, encrypted)) as
+      | {
+          mxc: string;
+          mime_type: string | null;
+          size: number | null;
+          width: number | null;
+          height: number | null;
+          decryption_info: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    let uploaded: Uploaded;
+    if (encrypted) {
+      // An encrypted entry without a readable key is useless: treat it as never uploaded
+      if (!row.decryption_info) return null;
+      try {
+        uploaded = { file: { ...(JSON.parse(row.decryption_info) as EncryptedFile), url: row.mxc } };
+      } catch {
+        return null;
+      }
+    } else {
+      uploaded = { url: row.mxc };
+    }
+    return {
+      uploaded,
+      mimetype: row.mime_type ?? 'application/octet-stream',
+      size: row.size ?? 0,
+      ...(row.width ? { w: row.width } : {}),
+      ...(row.height ? { h: row.height } : {}),
+    };
+  }
+
+  /** Remembers a sticker upload (validated image only) for later sends in the same mode. */
+  putStickerMedia(stickerId: number | string, encrypted: boolean, media: StickerMedia): void {
+    const file = 'file' in media.uploaded ? media.uploaded.file : null;
+    // The mode must match the upload: a plain mxc under an `-encrypted` id (or the reverse)
+    // would hand an encrypted room an unencrypted file, or a plain room an unreadable one
+    if (encrypted !== Boolean(file)) return;
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO zalo_file (id, mxc, mime_type, size, width, height, timestamp, decryption_info)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        stickerFileId(stickerId, encrypted),
+        file ? file.url : (media.uploaded as { url: string }).url,
+        media.mimetype,
+        media.size,
+        media.w ?? null,
+        media.h ?? null,
+        Math.floor(Date.now() / 1000),
+        file ? JSON.stringify(file) : null,
+      );
+  }
+
+  /** Forgets a stored sticker upload (e.g. its media was purged), so the next send uploads again. */
+  deleteStickerMedia(stickerId: number | string): void {
+    this.db
+      .prepare('DELETE FROM zalo_file WHERE id IN (?, ?)')
+      .run(stickerFileId(stickerId, false), stickerFileId(stickerId, true));
+  }
+
+  /**
+   * Notes that a live photo / media message reached Matrix only as a failure notice.
+   * A later failure of the same message replaces the row.
+   *
+   * @param zaloMsgId Zalo message id.
+   * @param roomId Room the notice was posted in.
+   * @param eventId Event id of the notice.
+   * @param kind Media kind (photo, video, file, voice, gif, ...).
+   * @param error Why the download failed (hosts and errors only, no signed URL).
+   */
+  recordMediaFailure(zaloMsgId: string, roomId: string, eventId: string, kind: string, error: string): void {
+    this.db
+      .prepare(
+        'INSERT OR REPLACE INTO media_failure (zalo_msg_id, room_id, event_id, kind, error, ts, account_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      )
+      .run(zaloMsgId, roomId, eventId, kind, error.slice(0, 500), Date.now(), this.accountId);
+  }
+
+  /**
+   * Rooms that still show failure notices, newest failure first. A failure counts while its
+   * message row still points at the notice event: a rebuild that re-renders the message gives
+   * it a new event id (or room) and so closes the failure.
+   *
+   * @returns One row per room: open failure count, the latest failure time and the kinds seen.
+   */
+  listOpenMediaFailures(): OpenMediaFailures[] {
+    const rows = this.db
+      .prepare(
+        `SELECT f.room_id AS roomId, COUNT(*) AS count, MAX(f.ts) AS lastTs, GROUP_CONCAT(DISTINCT f.kind) AS kinds
+         FROM media_failure f
+         JOIN message m ON m.zalo_msg_id = f.zalo_msg_id AND m.event_id = f.event_id AND m.room_id = f.room_id
+         GROUP BY f.room_id ORDER BY lastTs DESC`,
+      )
+      .all() as Array<{ roomId: string; count: number; lastTs: number; kinds: string | null }>;
+    return rows.map((row) => ({ ...row, kinds: row.kinds ? row.kinds.split(',') : [] }));
+  }
+
+  /**
+   * One open media failure (its message row still points at the notice), or null when it
+   * is closed or was never recorded.
+   */
+  getOpenMediaFailure(zaloMsgId: string): { roomId: string; eventId: string; kind: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT f.room_id AS roomId, f.event_id AS eventId, f.kind AS kind FROM media_failure f
+         JOIN message m ON m.zalo_msg_id = f.zalo_msg_id AND m.event_id = f.event_id AND m.room_id = f.room_id
+         WHERE f.zalo_msg_id = ?`,
+      )
+      .get(zaloMsgId) as { roomId: string; eventId: string; kind: string } | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Open media failures recorded since `sinceTs`, oldest first, with the Zalo thread of their
+   * portal: what the media auto-repair queue picks up again after a restart.
+   */
+  listOpenMediaFailuresSince(
+    sinceTs: number,
+  ): Array<{ zaloMsgId: string; threadId: string; threadType: ZaloThreadType; ts: number }> {
+    return this.db
+      .prepare(
+        `SELECT f.zalo_msg_id AS zaloMsgId, p.thread_id AS threadId, p.thread_type AS threadType, f.ts AS ts
+         FROM media_failure f
+         JOIN message m ON m.zalo_msg_id = f.zalo_msg_id AND m.event_id = f.event_id AND m.room_id = f.room_id
+         JOIN portal p ON p.room_id = f.room_id
+         WHERE f.ts >= ? ORDER BY f.ts`,
+      )
+      .all(sinceTs) as Array<{ zaloMsgId: string; threadId: string; threadType: ZaloThreadType; ts: number }>;
+  }
+
+  /**
+   * Points a repaired message at the event that replaced its failure notice and drops the
+   * failure row, in one transaction.
+   */
+  resolveMediaFailure(zaloMsgId: string, newEventId: string): void {
+    this.db.transaction(() => {
+      this.db.prepare('UPDATE message SET event_id = ? WHERE zalo_msg_id = ?').run(newEventId, zaloMsgId);
+      this.db.prepare('DELETE FROM media_failure WHERE zalo_msg_id = ?').run(zaloMsgId);
+    })();
   }
 
   /**
@@ -411,6 +665,8 @@ export class MappingStore {
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM message WHERE room_id = ?').run(portal.room_id);
       this.db.prepare('DELETE FROM reaction WHERE room_id = ?').run(portal.room_id);
+      this.db.prepare('DELETE FROM poll WHERE room_id = ?').run(portal.room_id);
+      this.db.prepare('DELETE FROM media_failure WHERE room_id = ?').run(portal.room_id);
       this.db.prepare('DELETE FROM portal WHERE thread_id = ?').run(threadId);
     })();
   }
@@ -594,6 +850,51 @@ export class MappingStore {
   /** Forgets one bridged reaction. */
   deleteReaction(eventId: string): void {
     this.db.prepare('DELETE FROM reaction WHERE event_id = ?').run(eventId);
+  }
+
+  /** Records a bridged poll (either direction); a repeated poll id or start event is ignored. */
+  recordPoll(poll: Pick<PollRow, 'pollId' | 'roomId' | 'eventId' | 'creatorId' | 'options' | 'multi'>): void {
+    this.db
+      .prepare(
+        'INSERT OR IGNORE INTO poll (poll_id, room_id, event_id, creator_id, options_json, multi) VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .run(poll.pollId, poll.roomId, poll.eventId, poll.creatorId, JSON.stringify(poll.options), poll.multi ? 1 : 0);
+  }
+
+  private pollFrom(row: PollDbRow | undefined): PollRow | null {
+    if (!row) return null;
+    return {
+      pollId: row.poll_id,
+      roomId: row.room_id,
+      eventId: row.event_id,
+      creatorId: row.creator_id,
+      options: JSON.parse(row.options_json) as PollOptionMapping[],
+      multi: row.multi === 1,
+      closed: row.closed === 1,
+      votes: JSON.parse(row.votes_json) as Record<string, number[]>,
+    };
+  }
+
+  /** The bridged poll with this Zalo poll id, or null. */
+  getPollById(pollId: number): PollRow | null {
+    return this.pollFrom(this.db.prepare('SELECT * FROM poll WHERE poll_id = ?').get(pollId) as PollDbRow | undefined);
+  }
+
+  /** The bridged poll behind a Matrix poll.start event, or null. */
+  getPollByEventId(eventId: string): PollRow | null {
+    return this.pollFrom(
+      this.db.prepare('SELECT * FROM poll WHERE event_id = ?').get(eventId) as PollDbRow | undefined,
+    );
+  }
+
+  /** Replaces the last known votes of a poll (Zalo uid → picked option ids). */
+  setPollVotes(pollId: number, votes: Record<string, number[]>): void {
+    this.db.prepare('UPDATE poll SET votes_json = ? WHERE poll_id = ?').run(JSON.stringify(votes), pollId);
+  }
+
+  /** Marks a poll as locked / ended (`closed = false` reopens it, to undo a lock Zalo refused). */
+  closePoll(pollId: number, closed = true): void {
+    this.db.prepare('UPDATE poll SET closed = ? WHERE poll_id = ?').run(closed ? 1 : 0, pollId);
   }
 
   /** True when this Zalo msgId was already bridged (either direction). */

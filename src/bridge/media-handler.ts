@@ -1,177 +1,47 @@
-// Media transfer: guarded Zalo CDN downloads → Matrix content repo (photos, stickers), plus
-// the authenticated Matrix media download used for outbound sends. Zalo CDN URLs are public
-// (no session headers) but expire — always download immediately on event receipt.
+// Inbound photos and stickers: Zalo CDN → Matrix content repo → portal room. Zalo CDN URLs are
+// public (no session headers) but expire, so download immediately on event receipt.
 import type { Intent } from 'matrix-appservice-bridge';
 import { animatedSticker } from './animated-sticker.ts';
+import {
+  buildMediaEvent,
+  downloadFirstMedia,
+  fileExtensionFor,
+  roomUploader,
+  stickerContent,
+} from './media-content.ts';
+import { fetchMediaCapped, sniffMimetype } from './media-fetch.ts';
+import type { MappingStore, StickerMedia } from './mapping-store.ts';
 
 /** A Zalo photo message as needed to bridge it. */
-export type InboundPhoto = {
+type InboundPhoto = {
   url: string;
+  /** Other copies (HD, thumbnail) tried in order when `url` fails. */
+  fallbackUrls?: string[];
   width?: number;
   height?: number;
   caption?: string;
+  /** What to call the photo in log lines, e.g. `photo <msgId>`. */
+  label?: string;
 };
 
 /** Result of bridging one media message into Matrix. */
-export type MediaResult = {
+type MediaResult = {
   eventId: string;
 };
 
-const FETCH_TIMEOUT_MS = 30_000;
-// Media URLs come from message payloads (contact-influenced input) — restrict
-// to Zalo CDN hosts over https to close SSRF toward localhost/LAN.
-// dlmd.me / dlfl.vn are Zalo's signed video / file download CDNs; they 301 to
-// mdchat.me / flchat.vn (then 302 to an edge node there), so both must be allowed.
-const ALLOWED_HOST_SUFFIXES = ['.zdn.vn', '.zadn.vn', '.dlmd.me', '.dlfl.vn', '.mdchat.me', '.flchat.vn'];
+/** Persistent sticker upload cache (MappingStore implements it); see {@link bridgeInboundSticker}. */
+export type StickerMediaStore = Pick<MappingStore, 'getStickerMedia' | 'putStickerMedia'>;
 
-/** Downloaded bytes plus the server-declared mimetype (parameters stripped). */
-export type FetchedMedia = {
-  buffer: Buffer;
-  mimetype: string;
-};
-
-/**
- * Real media type from magic bytes — Zalo CDNs mislabel (GIFs as image/jpeg, stickers unlabelled).
- *
- * @param buffer - File contents (only the first few bytes are inspected).
- * @param fallback - Declared mimetype; returned when no signature matches. For ISO-BMFF
- *   (`ftyp`) containers an `audio/*` fallback is kept, since the same box marks m4a audio.
- * @returns The sniffed mimetype, or `fallback`.
- */
-export function sniffMimetype(buffer: Buffer, fallback: string): string {
-  /** Bytes [start, end) as a latin1 string, for comparing ASCII signatures. */
-  const asciiAt = (start: number, end: number) => buffer.subarray(start, end).toString('latin1');
-  if (buffer[0] === 0xff && buffer[1] === 0xd8) return 'image/jpeg';
-  if (asciiAt(1, 4) === 'PNG') return 'image/png';
-  if (asciiAt(0, 4) === 'GIF8') return 'image/gif';
-  if (asciiAt(0, 4) === 'RIFF' && asciiAt(8, 12) === 'WEBP') return 'image/webp';
-  if (asciiAt(4, 8) === 'ftyp')
-    return asciiAt(8, 10) === 'qt' ? 'video/quicktime' : fallback.startsWith('audio/') ? fallback : 'video/mp4';
-  if (asciiAt(0, 4) === '%PDF') return 'application/pdf';
-  // Zalo voice notes are raw ADTS AAC served as image/jpeg
-  if (buffer[0] === 0xff && ((buffer[1] ?? 0) & 0xf6) === 0xf0) return 'audio/aac';
-  if (asciiAt(0, 3) === 'ID3' || (buffer[0] === 0xff && ((buffer[1] ?? 0) & 0xe0) === 0xe0)) return 'audio/mpeg';
-  if (asciiAt(0, 5) === '#!AMR') return 'audio/amr';
-  if (asciiAt(0, 4) === 'OggS') return 'audio/ogg';
-  return fallback;
-}
-
-/**
- * Download Matrix media (mxc://) via the authenticated media endpoint.
- * Beeper serves media behind auth + a redirect to R2; matrix-bot-sdk's
- * downloadContent forwards the Authorization header to R2 and gets a 400.
- * Native fetch strips auth on the cross-origin redirect, so it works.
- *
- * @param homeserverUrl - Homeserver base URL.
- * @param accessToken - Token sent as Bearer auth (the appservice token).
- * @param mxcUrl - `mxc://<server>/<mediaId>` URL to download.
- * @param maxBytes - Streamed size cap; the download aborts once exceeded.
- * @returns The bytes and the response mimetype (`application/octet-stream` when absent).
- * @throws On a malformed mxc URL, non-2xx answer, empty body, timeout (FETCH_TIMEOUT_MS) or size cap.
- */
-export async function downloadMatrixMedia(
-  homeserverUrl: string,
-  accessToken: string,
-  mxcUrl: string,
-  maxBytes: number,
-): Promise<FetchedMedia> {
-  const match = /^mxc:\/\/([^/]+)\/(.+)$/.exec(mxcUrl);
-  if (!match) throw new Error(`bad mxc url: ${mxcUrl}`);
-  const [, server, mediaId] = match;
-  const url = `${homeserverUrl}/_matrix/client/v1/media/download/${server}/${mediaId}`;
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`matrix media download failed: HTTP ${response.status}`);
-  if (!response.body) throw new Error('matrix media download returned no body');
-  return readCapped(response, maxBytes);
-}
-
-/**
- * Streams a response body into memory with a hard size cap (content-length can be spoofed,
- * so it is never trusted for allocation).
- *
- * @returns the bytes and the declared mimetype (parameters stripped; `application/octet-stream` when absent)
- * @throws once more than `maxBytes` arrive
- */
-async function readCapped(response: Response, maxBytes: number): Promise<FetchedMedia> {
-  const chunks: Uint8Array[] = [];
-  let receivedBytes = 0;
-  for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
-    receivedBytes += chunk.byteLength;
-    if (receivedBytes > maxBytes) throw new Error(`media exceeds size cap (>${maxBytes} bytes)`);
-    chunks.push(chunk);
-  }
-  return {
-    buffer: Buffer.concat(chunks),
-    mimetype: response.headers.get('content-type')?.split(';')[0] ?? 'application/octet-stream',
-  };
-}
-
-/** Redirect hops a media download may follow (each one re-checked against the allowlist). */
-const MAX_REDIRECTS = 5;
-
-/**
- * Throws unless `url` is an https URL on an allowlisted Zalo CDN host.
- * @throws Error naming the rejected protocol or host
- */
-export function assertZaloMediaUrl(url: string): void {
-  const parsed = new URL(url);
-  if (parsed.protocol !== 'https:') throw new Error(`refusing non-https media URL (${parsed.protocol})`);
-  if (!ALLOWED_HOST_SUFFIXES.some((suffix) => parsed.hostname.endsWith(suffix))) {
-    throw new Error(`refusing media host outside Zalo CDN (${parsed.hostname})`);
-  }
-}
-
-/**
- * Guarded download: https-only, Zalo CDN hosts (on every redirect hop), hard timeout,
- * streamed byte cap.
- *
- * @param url - Zalo CDN media URL (untrusted, from a message payload).
- * @param maxBytes - Streamed size cap; the download aborts once exceeded.
- * @param timeoutMs - Hard timeout for the whole request, redirects included.
- * @returns The bytes and the declared mimetype (`application/octet-stream` when absent);
- *   callers should still run {@link sniffMimetype} since Zalo mislabels media.
- * @throws On a non-https URL or a host outside ALLOWED_HOST_SUFFIXES (also for a redirect
- *   target), more than MAX_REDIRECTS hops, non-2xx answer, empty body, an HTML/JSON error
- *   page, timeout or the size cap.
- */
-export async function fetchMediaCapped(
-  url: string,
-  maxBytes: number,
-  timeoutMs = FETCH_TIMEOUT_MS,
-): Promise<FetchedMedia> {
-  // Redirects are followed by hand so every hop passes the https + Zalo-host check —
-  // fetch's automatic following would let a CDN redirect reach any host (SSRF)
-  const signal = AbortSignal.timeout(timeoutMs);
-  let currentUrl = url;
-  let response: Response;
-  for (let hop = 0; ; hop++) {
-    assertZaloMediaUrl(currentUrl);
-    response = await fetch(currentUrl, { signal, redirect: 'manual' });
-    const location = response.headers.get('location');
-    if (response.status < 300 || response.status >= 400 || !location) break;
-    await response.body?.cancel(); // release the redirect response's connection
-    if (hop >= MAX_REDIRECTS) throw new Error(`media download: too many redirects (>${MAX_REDIRECTS})`);
-    currentUrl = new URL(location, currentUrl).toString();
-  }
-  if (!response.ok) throw new Error(`media download failed: HTTP ${response.status}`);
-  if (!response.body) throw new Error('media download returned no body');
-  // Expired links can answer 200 with an HTML/JSON error page instead of the media
-  if (/^(text\/html|application\/json)/.test(response.headers.get('content-type') ?? '')) {
-    throw new Error('media download returned an error page');
-  }
-  return readCapped(response, maxBytes);
-}
-
-// Sticker mxc cache — the same sticker id is sent many times; upload once per run
-const stickerMxcCache = new Map<number, { mxc: string; mimetype: string; size: number; w?: number; h?: number }>();
+// Sticker upload cache: the same sticker id is sent many times, so upload once per mode.
+// Keyed by mode and sticker id. An encrypted upload is not tied to a room (the key travels in
+// each event), so one encrypted upload serves every encrypted room.
+const stickerMxcCache = new Map<string, StickerMedia>();
 
 /**
  * Renders a Zalo sticker as a native Matrix m.sticker event.
- * The uploaded image is cached per sticker id for the process lifetime (see stickerMxcCache).
+ * The uploaded image is reused per sticker id and mode (plain or encrypted): from the in-process
+ * cache, else from `store` (kept across restarts and shared with the history importer). Only a
+ * validated image is cached.
  *
  * @param intent - Sender intent (the ghost of the Zalo sender).
  * @param roomId - Portal room.
@@ -179,6 +49,8 @@ const stickerMxcCache = new Map<number, { mxc: string; mimetype: string; size: n
  * @param imageUrl - Static sticker image URL, used when no animated version exists.
  * @param maxBytes - Download size cap.
  * @param extra - Extra content fields merged into the event (e.g. relations); they override defaults.
+ * @param encrypted - Whether the room is encrypted: the image is then uploaded encrypted and sent as `file`.
+ * @param store - Persistent sticker cache; without it only the in-process cache is used.
  * @returns The Matrix event id.
  * @throws When neither an animated nor a static image is available, or on download/upload/send errors.
  */
@@ -189,9 +61,13 @@ export async function bridgeInboundSticker(
   imageUrl: string | null,
   maxBytes: number,
   extra?: Record<string, unknown>,
+  encrypted = false,
+  store?: StickerMediaStore,
 ): Promise<MediaResult> {
-  let cached = stickerMxcCache.get(stickerId);
-  if (!cached) {
+  const cacheKey = `${encrypted ? 'encrypted' : 'plain'}:${stickerId}`;
+  let cached = stickerMxcCache.get(cacheKey) ?? store?.getStickerMedia(stickerId, encrypted) ?? undefined;
+  if (cached) stickerMxcCache.set(cacheKey, cached);
+  else {
     // Animated stickers have no animated URL — build the WebP from Zalo's sprite strip
     const animated = await animatedSticker(stickerId);
     let image: { buffer: Buffer; mimetype: string; w?: number; h?: number };
@@ -200,17 +76,21 @@ export async function bridgeInboundSticker(
     else if (imageUrl) {
       const { buffer, mimetype } = await fetchMediaCapped(imageUrl, maxBytes);
       image = { buffer, mimetype: sniffMimetype(buffer, mimetype) };
+      // A 200 answer is not proof of an image: a few-byte non-image body would show as a broken sticker
+      if (!image.mimetype.startsWith('image/'))
+        throw new Error(`sticker ${stickerId} is not an image (${buffer.byteLength} bytes, ${image.mimetype})`);
     } else throw new Error('sticker image unavailable');
-    const mxc = await intent.uploadContent(image.buffer, { type: image.mimetype, name: `zalo-sticker-${stickerId}` });
-    cached = { mxc, mimetype: image.mimetype, size: image.buffer.byteLength, w: image.w, h: image.h };
-    stickerMxcCache.set(stickerId, cached);
+    const upload = roomUploader((buffer, options) => intent.uploadContent(buffer, options), encrypted);
+    const uploaded = await upload(image.buffer, { type: image.mimetype, name: `zalo-sticker-${stickerId}` });
+    cached = { uploaded, mimetype: image.mimetype, size: image.buffer.byteLength, w: image.w, h: image.h };
+    stickerMxcCache.set(cacheKey, cached);
+    try {
+      store?.putStickerMedia(stickerId, encrypted, cached);
+    } catch {
+      // The cache is an optimisation: a busy or read-only database must not lose the sticker
+    }
   }
-  const { event_id } = await intent.sendEvent(roomId, 'm.sticker', {
-    body: 'sticker',
-    url: cached.mxc,
-    info: { mimetype: cached.mimetype, size: cached.size, ...(cached.w ? { w: cached.w, h: cached.h } : {}) },
-    ...extra,
-  });
+  const { event_id } = await intent.sendEvent(roomId, 'm.sticker', { ...stickerContent(cached, stickerId), ...extra });
   return { eventId: event_id };
 }
 
@@ -223,8 +103,9 @@ export async function bridgeInboundSticker(
  * @param photo - Photo URL, optional dimensions and caption.
  * @param maxBytes - Download size cap.
  * @param extra - Extra content fields merged into the event (e.g. relations); they override defaults.
+ * @param encrypted - Whether the room is encrypted: the photo is then uploaded encrypted and sent as `file`.
  * @returns The Matrix event id.
- * @throws On download (see {@link fetchMediaCapped}), upload or send errors.
+ * @throws On download (MediaDownloadError, see {@link downloadFirstMedia}), upload or send errors.
  */
 export async function bridgeInboundPhoto(
   intent: Intent,
@@ -232,25 +113,20 @@ export async function bridgeInboundPhoto(
   photo: InboundPhoto,
   maxBytes: number,
   extra?: Record<string, unknown>,
+  encrypted = false,
 ): Promise<MediaResult> {
-  const { buffer, mimetype: declared } = await fetchMediaCapped(photo.url, maxBytes);
-  const mimetype = sniffMimetype(buffer, declared); // Zalo labels GIF photos image/jpeg
-  const extension = mimetype.split('/')[1]?.split(';')[0] ?? 'jpg';
-  const mxcUrl = await intent.uploadContent(buffer, { type: mimetype, name: `zalo-photo.${extension}` });
-  // MSC2530 caption: body = caption, filename = the actual file name. filename is always
-  // set so a caption-less photo (body === filename) shows no caption instead of the name
-  const content: Record<string, unknown> = {
-    msgtype: 'm.image',
-    body: photo.caption || `zalo-photo.${extension}`,
-    filename: `zalo-photo.${extension}`,
-    url: mxcUrl,
-    info: {
-      mimetype,
-      size: buffer.byteLength,
-      ...(photo.width ? { w: photo.width } : {}),
-      ...(photo.height ? { h: photo.height } : {}),
-    },
-  };
+  // Sniffed mimetype: Zalo labels GIF photos image/jpeg
+  const bytes = await downloadFirstMedia([photo.url, ...(photo.fallbackUrls ?? [])], maxBytes, {
+    label: photo.label ?? 'photo',
+  });
+  const upload = roomUploader((data, options) => intent.uploadContent(data, options), encrypted);
+  // Same builder as history imports, so live encrypted photos get their thumbnail too
+  const { content } = await buildMediaEvent(
+    upload,
+    { kind: 'image', urls: [photo.url], caption: photo.caption, width: photo.width, height: photo.height },
+    bytes,
+    { filename: `zalo-photo.${fileExtensionFor(bytes.mimetype)}` },
+  );
   Object.assign(content, extra);
   const { event_id } = await intent.sendMessage(roomId, content);
   return { eventId: event_id };

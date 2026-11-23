@@ -74,6 +74,8 @@ describe('normalizeZaloMessage', () => {
       kind: 'photo',
       url: 'https://photo-stal-19.zdn.vn/x/y.jpg',
       thumbUrl: 'https://photo-stal-19.zdn.vn/x/y-thumb.jpg',
+      // HD then thumbnail: the copies tried when the main link fails (e.g. expired)
+      fallbackUrls: ['https://cdn/hd.jpg', 'https://photo-stal-19.zdn.vn/x/y-thumb.jpg'],
       width: 3024,
       height: 4032,
     });

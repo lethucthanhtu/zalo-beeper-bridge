@@ -27,6 +27,11 @@ bridge:
   dbPath: bridge.db
   mediaMaxBytes: 10485760
 
+encryption:
+  enabled: false
+  storePath: crypto
+  upgradeExisting: true
+
 network:
   name: Zalo
   networkId: zalo
@@ -67,6 +72,19 @@ The rate limiter protects the account: a sudden flood of messages is a typical r
 | `dbPath`        | `bridge.db`         | SQLite database with the portal, ghost and message mappings. See [Database schema](../reference/database). |
 | `mediaMaxBytes` | `10485760` (10 MiB) | Size cap for photos, stickers and link-preview images. Videos and files have a fixed cap of 100 MB.        |
 
+## `encryption`
+
+| Key               | Default  | Description                                                                                                                                               |
+| ----------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`         | `false`  | End-to-bridge encryption. The bridge bot gets its own Matrix crypto device, new portals are created encrypted, and the bot encrypts and decrypts in them. |
+| `storePath`       | `crypto` | Folder of the bot's crypto store and device file. The history importer keeps its own device next to it, in `<storePath>-import`.                          |
+| `upgradeExisting` | `true`   | Turn encryption on in existing plain portals at start-up (see below).                                                                                     |
+
+Matrix cannot encrypt events that already exist, so turning encryption on gives existing plain portals two ways forward:
+
+- **In place** (`upgradeExisting: true`, the default). At start-up the bridge adds the bot to each plain portal and turns encryption on in it. Messages from then on are encrypted; the history before stays plain in the same room. Nothing is rebuilt, so this is the easy choice. A room that fails (for example a permission error) is logged and retried at the next start.
+- **Rebuild** (`upgradeExisting: false`). Portals stay plain until you move each chat into a new encrypted room with its full history, using the history importer (see [Importer CLI](../history-import/importer-cli#encrypted-rooms)). Choose this when the old history must be encrypted too.
+
 ## `network`
 
 How Beeper names and brands the network.
@@ -106,5 +124,6 @@ The bridge's own lines (`[zalo]`, `[bridge]`, `[sync]`, …) are always logged. 
 | `zalo-creds.session.json`           | Encrypted Zalo session                       | Yes     |
 | `.zalo-creds.session.json.key`      | Key for the session file                     | Yes     |
 | `registration.yaml` (you create it) | Appservice tokens                            | Yes     |
+| `crypto/`, `crypto-import/`         | Bot crypto keys and device access tokens     | Yes     |
 
 All of them are gitignored. Never commit them or paste them into issues.

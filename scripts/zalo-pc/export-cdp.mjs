@@ -1,6 +1,9 @@
 // Export Zalo PC message history through the app's own data layer over local CDP.
 // Output: <outDir>/conversations.json + <outDir>/<threadKey>.ndjson (one raw Core.Message
 // row per line, oldest first). threadKey = "g<groupId>" for groups, the peer uid for DMs.
+// Threads with reactions also get <outDir>/<threadKey>.reactions.json: an array of
+// { rMsgId, rCli, reactions } from Zalo PC's Reaction DB, where reactions is
+// { reactorUid: { rType: count } } and reactor "0" is the account owner.
 //
 // Usage: node scripts/zalo-pc/export-cdp.mjs <outDir> [threadKey1,threadKey2,... | --list]
 //   (no key list = every conversation Zalo PC knows; --list = conversations.json only)
@@ -63,7 +66,18 @@ const KEEP = [
   'height',
   'fileSize',
 ];
+// Reactions of every message, grouped by thread id (Reaction rows carry the id without "g")
+const reactionsByThread = await evaluate(`(async()=>{${DB}
+  const rows = await DB.Reaction.Reaction.getAll().catch(()=>[]);
+  const by = {};
+  for (const r of rows) {
+    if (!r.reactions || !Object.keys(r.reactions).length) continue;
+    (by[String(r.idTo)] ||= []).push({ rMsgId: String(r.rMsgId ?? ''), rCli: String(r.rClientMsgId ?? ''), reactions: r.reactions });
+  }
+  return by;
+})()`);
 let total = 0;
+let totalReactions = 0;
 // Per conversation: page backwards through Core.Message (2000 rows per Runtime.evaluate)
 // until a short or non-advancing page, then write the rows oldest-first as NDJSON.
 for (const conv of conversationMeta.convs) {
@@ -88,7 +102,12 @@ for (const conv of conversationMeta.convs) {
   rows.reverse(); // oldest first
   fs.writeFileSync(path.join(outDir, `${key}.ndjson`), rows.map((row) => JSON.stringify(row)).join('\n'));
   total += rows.length;
+  const reactions = reactionsByThread[key.replace(/^g/, '')] ?? [];
+  const reactionsFile = path.join(outDir, `${key}.reactions.json`);
+  if (reactions.length) fs.writeFileSync(reactionsFile, JSON.stringify(reactions));
+  else fs.rmSync(reactionsFile, { force: true }); // no stale sidecar from an earlier export
+  totalReactions += reactions.length;
   process.stdout.write(`${key}:${rows.length} `);
 }
-console.log(`\nTOTAL messages: ${total}`);
+console.log(`\nTOTAL messages: ${total}, reacted messages: ${totalReactions}`);
 close();

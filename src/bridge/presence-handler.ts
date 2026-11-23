@@ -5,7 +5,7 @@
 import type { Intent } from 'matrix-appservice-bridge';
 import type { EchoSuppressor } from './echo-suppressor.ts';
 import type { MappingStore } from './mapping-store.ts';
-import { rememberBridgedEvent, SELF_BRIDGE_MARKER } from './outbound-handler.ts';
+import { rememberBridgedEvent, SELF_BRIDGE_MARKER, type BridgedEvents } from './self-bridge.ts';
 import type { PuppetRegistry } from './puppet-registry.ts';
 import { zaloToEmoji } from '../zalo/reaction-map.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
@@ -20,7 +20,7 @@ export type PresenceOwnerDeps = {
   /** Double-puppet intent of the owner (lazy: the appservice must be up first). */
   ownerIntent: () => Intent;
   /** Event ids the bridge posted as the owner (OutboundHandler skips them). */
-  bridgedEventIds: Set<string>;
+  bridgedEventIds: BridgedEvents;
   /** Recognises Zalo's echo of a reaction removal made in Beeper. */
   echo: EchoSuppressor;
 };

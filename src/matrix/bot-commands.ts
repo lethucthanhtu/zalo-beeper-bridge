@@ -1,7 +1,7 @@
 // Management commands handled by the bridge bot (@sh-zalobot).
 // Commands accepted ONLY from the configured owner (single-user bridge).
 import type { Bridge, WeakEvent } from 'matrix-appservice-bridge';
-import type { AccountRow } from '../bridge/mapping-store.ts';
+import type { AccountRow, OpenMediaFailures } from '../bridge/mapping-store.ts';
 import type { ZaloClient } from '../zalo/zalo-client.ts';
 import { errorMessage } from '../error-message.ts';
 
@@ -23,6 +23,10 @@ export type BotCommandContext = {
   runSync: () => Promise<string>;
   /** Zalo accounts the bridge has logged in to (multi-account groundwork). */
   listAccounts: () => AccountRow[];
+  /** Rooms with photos/files that reached Matrix only as a failure notice, with portal names. */
+  listMediaFailures: () => Array<OpenMediaFailures & { name: string | null; threadId: string | null }>;
+  /** Failures the media auto-repair queue will still retry. */
+  mediaRepairQueued?: () => number;
 };
 
 /**
@@ -105,8 +109,6 @@ async function handleStatus(context: BotCommandContext, roomId: string): Promise
 async function handleAccounts(context: BotCommandContext, roomId: string): Promise<void> {
   const accounts = context.listAccounts();
   const current = context.zalo.ownId;
-  /** ISO date-time without seconds, or "never". */
-  const when = (ms: number | null) => (ms ? new Date(ms).toISOString().slice(0, 16).replace('T', ' ') : 'never');
   const lines = accounts.length
     ? accounts.map(
         (account) =>
@@ -116,10 +118,39 @@ async function handleAccounts(context: BotCommandContext, roomId: string): Promi
   await context.bridge.getIntent().sendText(roomId, ['Zalo accounts:', ...lines].join('\n'));
 }
 
+/** ISO date-time without seconds, or "never". */
+const when = (ms: number | null): string => (ms ? new Date(ms).toISOString().slice(0, 16).replace('T', ' ') : 'never');
+
+/**
+ * `media-failures` command (read-only): lists the rooms whose photos/files reached Matrix only
+ * as a "could not be bridged" notice and are not repaired yet, with how to repair them.
+ *
+ * @param context - Bot command context.
+ * @param roomId - Management room to answer in.
+ */
+async function handleMediaFailures(context: BotCommandContext, roomId: string): Promise<void> {
+  const rooms = context.listMediaFailures();
+  const queued = context.mediaRepairQueued?.() ?? 0;
+  const text = rooms.length
+    ? [
+        `Media that reached Matrix only as a notice (${rooms.reduce((sum, room) => sum + room.count, 0)} in ${rooms.length} room(s)):`,
+        ...rooms.map(
+          (room) =>
+            `• ${room.name ?? room.roomId} — ${room.count} ${room.kinds.join('/')}, last ${when(room.lastTs)} UTC` +
+            (room.threadId ? ` (thread ${room.threadId})` : ''),
+        ),
+        ...(queued ? [`${queued} of them are still being retried automatically (up to about an hour).`] : []),
+        'To repair the rest: rebuild the chat with the history importer and --media-dir (the Zalo PC media folder); ' +
+          'it re-renders these notices as the real files. See docs/history-import/manual.md.',
+      ].join('\n')
+    : 'No open media failures: every bridged photo and file reached Matrix.';
+  await context.bridge.getIntent().sendText(roomId, text);
+}
+
 /**
  * Handles bot-directed events (any event outside a portal room). Auto-joins the owner's
  * invite to the bot and dispatches the owner's text commands
- * (`ping | login | logout | status | sync | accounts`); everyone else is ignored.
+ * (`ping | login | logout | status | sync | accounts | media-failures`); everyone else is ignored.
  *
  * Side effects: Matrix joins/sends as the bot; `login`/`logout`/`sync` change Zalo state.
  *
@@ -142,7 +173,7 @@ export async function handleBotEvent(context: BotCommandContext, event: WeakEven
         .getIntent()
         .sendText(
           event.room_id,
-          'sh-zalo bridge bot ready. Commands: ping | login | logout | status | sync | accounts',
+          'sh-zalo bridge bot ready. Commands: ping | login | logout | status | sync | accounts | media-failures',
         );
     }
     return true;
@@ -167,6 +198,9 @@ export async function handleBotEvent(context: BotCommandContext, event: WeakEven
       return true;
     case 'accounts':
       await handleAccounts(context, event.room_id);
+      return true;
+    case 'media-failures':
+      await handleMediaFailures(context, event.room_id);
       return true;
     case 'sync': {
       if (!context.zalo.isLoggedIn) {
