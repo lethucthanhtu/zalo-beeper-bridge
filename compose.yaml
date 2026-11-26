@@ -11,6 +11,8 @@ services:
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
       # Optional alternative to container-config/bbctl-config.json
       MATRIX_ACCESS_TOKEN: ${MATRIX_ACCESS_TOKEN:-}
+      # Inbound messages slower than this (ms) log a [timing] line with the time per phase
+      BRIDGE_SLOW_MS: ${BRIDGE_SLOW_MS:-1500}
       # 1 = log every Zalo websocket frame header (cmd/size only) for diagnosis
       ZALO_WS_TRACE: ${ZALO_WS_TRACE:-0}
     volumes:

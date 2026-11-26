@@ -12,6 +12,11 @@ This repository is a fork of
 
 ### Added
 
+- Latency trace for inbound messages. A Zalo message that takes longer than 1500 ms to reach
+  Matrix (`BRIDGE_SLOW_MS` changes the limit, `0` logs every message) gets one extra line,
+  `[timing] in group photo msg=N total=4210ms queue=… portal=… ghost=… prepare=… upload=… send=…`,
+  which shows whether the time went to waiting behind earlier messages, portal or ghost
+  setup, the media download, the Matrix upload or the (encrypted) send. Ids only, never content.
 - Sticker upload cache (database schema v11, table `zalo_file`, modelled on mautrix-telegram's
   `telegram_file`). Each Zalo sticker is uploaded once per mode
   (plain or encrypted) and reused in every room, also after a restart, by both the live

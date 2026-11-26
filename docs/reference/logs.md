@@ -27,6 +27,7 @@ tail -f ~/zalo-beeper-bridge/logs/bridge.log   # path set in the plist
 | `[sync]`       | The `sync` command and reconnect catch-up    |
 | `[beeper]`     | Beeper account state and network branding    |
 | `[media]`      | Zalo CDN downloads                           |
+| `[timing]`     | Slow inbound messages (time per phase)       |
 | `[audio]`      | Voice note conversion                        |
 | `[outbound]`   | Sends to Zalo                                |
 | `[appservice]` | HTTP requests from `bbctl proxy`             |
@@ -49,6 +50,8 @@ tail -f ~/zalo-beeper-bridge/logs/bridge.log   # path set in the plist
 | `E2EE DM push (cmd 551) seen — rerouting to the DM handler` | A DM arrived in Zalo's newer encrypted-push format and is handled like a normal DM.                               |
 | `history batch type=group\|user raw=N usable=N`             | One page of recent history was fetched.                                                                           |
 | `unhandled ws cmd N (subCmd N) — not bridged`               | Zalo sent an event type the bridge does not handle.                                                               |
+
+A message that takes longer than `BRIDGE_SLOW_MS` (default 1500 ms) to reach Matrix also writes one `[timing] in group photo msg=N total=4210ms queue=…ms portal=…ms ghost=…ms prepare=…ms upload=…ms send=…ms store=…ms` line (phases under 1 ms are left out). `queue` is the wait behind earlier messages of the same chat, `ghost` the sender account and room membership setup, `prepare` the work before an upload or send (media download, thumbnail, content), `upload` the Matrix media upload and `send` the Matrix send (encryption included). Ids only, never message content.
 
 With `ZALO_WS_TRACE=1` the bridge also writes `[zalo:ws] cmd=… sub=… bytes=…` for every websocket frame and `[zalo:http] getCloudMessage <groupId> cursor=… msgs=N` plus the reply's cursor metadata (never message content) for every history request. Use it only to debug; it is verbose.
 

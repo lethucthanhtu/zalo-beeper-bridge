@@ -20,6 +20,7 @@ import { rememberBridgedEvent, SELF_BRIDGE_MARKER, type BridgedEvents } from './
 import type { MappingStore, PortalRow } from './mapping-store.ts';
 import { ownerIntent } from './owner-intent.ts';
 import { InboundPolls } from './inbound-poll.ts';
+import { PhaseTimer, timeIntent } from './latency.ts';
 import { PinBubbleGuard } from './pin-guard.ts';
 import type { PortalManager } from './portal-manager.ts';
 import type { PuppetRegistry } from './puppet-registry.ts';
@@ -119,7 +120,16 @@ export class InboundHandler {
    * processed and returns immediately.
    */
   handle(msg: ZaloMessage): void {
-    this.enqueue(msg.threadId, `inbound ${msg.msgId}`, () => this.process(msg));
+    // Timed from receipt; logs one `[timing]` line only when the message was slow (ids only)
+    const timer = new PhaseTimer(`${msg.isSelf ? 'own' : 'in'} ${msg.threadType} ${msg.content.kind} msg=${msg.msgId}`);
+    this.enqueue(msg.threadId, `inbound ${msg.msgId}`, async () => {
+      timer.lap('queue');
+      try {
+        await this.process(msg, timer);
+      } finally {
+        timer.finish();
+      }
+    });
   }
 
   /**
@@ -223,9 +233,10 @@ export class InboundHandler {
    * the room), posts the content as the sender ghost or — for the owner's own
    * phone messages — as the owner (tagged with SELF_BRIDGE_MARKER and added to
    * `bridgedEventIds`), then records the message mapping.
+   * @param timer Phase stopwatch of this message (default: one that never logs).
    * @throws On portal/ghost provisioning or Matrix send failures (logged by `handle`).
    */
-  private async process(msg: ZaloMessage): Promise<void> {
+  private async process(msg: ZaloMessage, timer = new PhaseTimer('untimed', { slowMs: Infinity })): Promise<void> {
     // Echo of our OWN Beeper-sent message (outbound already recorded its msgId first,
     // so hasMessage is true before the echo path below can run): backfill the quote
     // payload + cliMsgId the send response lacked, so replying to / recalling our own
@@ -248,6 +259,7 @@ export class InboundHandler {
 
     if (msg.content.kind === 'delete' || msg.content.kind === 'recall') {
       await this.redactDeleted(msg, msg.content.msgIds);
+      timer.lap('redact');
       return;
     }
 
@@ -258,17 +270,22 @@ export class InboundHandler {
       senderName: msg.isSelf ? undefined : msg.senderName,
       resolveGroupName: this.deps.resolveGroupName,
     });
+    timer.lap('portal');
 
     // System lines ("X pinned a message", "joined the group", ...) are not a person's message
     if (msg.content.kind === 'notice') {
       await this.processNotice(msg, portal);
+      timer.lap('notice');
       return;
     }
 
-    const intent = msg.isSelf
+    const senderIntent = msg.isSelf
       ? ownerIntent(this.deps.bridge, this.deps.ownerUserId)
       : await this.intentForSender(msg, portal.room_id);
     const encrypted = (await this.deps.isEncrypted?.(portal.room_id)) ?? false;
+    timer.lap('ghost');
+    // Same intent, with its upload and send calls timed (everything before them is `prepare`)
+    const intent = timeIntent(senderIntent, timer);
 
     // Extra content fields merged into every post. For our own (double-puppeted)
     // messages this marks them so OutboundHandler never loops them back to Zalo.

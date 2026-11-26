@@ -107,14 +107,15 @@ The bridge's own lines (`[zalo]`, `[bridge]`, `[sync]`, …) are always logged. 
 
 ## Environment variables
 
-| Variable              | Used by              | Description                                                                                                                          |
-| --------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `MATRIX_ACCESS_TOKEN` | container            | Beeper access token for `bbctl proxy`, as an alternative to mounting `bbctl-config.json`. Used only when no bbctl config exists yet. |
-| `ZALO_WS_TRACE`       | bridge               | `1` logs the header of every Zalo websocket frame (command and size only, never content). For diagnosing unknown protocol frames.    |
-| `TZ`                  | container            | Time zone of the container. `compose.yaml` defaults to `Asia/Ho_Chi_Minh`.                                                           |
-| `BBCTL_CONFIG`        | container            | Where `bbctl` keeps its login inside the container. Preset to `/data/bbctl/config.json`.                                             |
-| `ZALO_CDP_URL`        | history-import tools | DevTools endpoint of Zalo PC. Defaults to `http://127.0.0.1:9229`.                                                                   |
-| `ZALO_APP`            | `import.sh`          | Path to `Zalo.app` on macOS when it is not in `/Applications`.                                                                       |
+| Variable              | Used by              | Description                                                                                                                            |
+| --------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `MATRIX_ACCESS_TOKEN` | container            | Beeper access token for `bbctl proxy`, as an alternative to mounting `bbctl-config.json`. Used only when no bbctl config exists yet.   |
+| `BRIDGE_SLOW_MS`      | bridge               | A Zalo message that takes longer than this many ms to reach Matrix gets a `[timing]` log line. Default `1500`; `0` logs every message. |
+| `ZALO_WS_TRACE`       | bridge               | `1` logs the header of every Zalo websocket frame (command and size only, never content). For diagnosing unknown protocol frames.      |
+| `TZ`                  | container            | Time zone of the container. `compose.yaml` defaults to `Asia/Ho_Chi_Minh`.                                                             |
+| `BBCTL_CONFIG`        | container            | Where `bbctl` keeps its login inside the container. Preset to `/data/bbctl/config.json`.                                               |
+| `ZALO_CDP_URL`        | history-import tools | DevTools endpoint of Zalo PC. Defaults to `http://127.0.0.1:9229`.                                                                     |
+| `ZALO_APP`            | `import.sh`          | Path to `Zalo.app` on macOS when it is not in `/Applications`.                                                                         |
 
 ## Files the bridge creates
 
