@@ -11,6 +11,7 @@ import {
   type EncryptedFile,
   EncryptedRoomEvent,
   MatrixClient,
+  MembershipEvent,
   RustSdkCryptoStorageProvider,
 } from '@vector-im/matrix-bot-sdk';
 import { Attachment, EncryptedAttachment, type StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
@@ -247,6 +248,17 @@ export async function initBotCrypto(opts: BotCryptoOptions): Promise<BotCrypto> 
   const deviceId = crypto.clientDeviceId;
   console.log(`[crypto] bot device ${deviceId} ready`);
 
+  // Serve the engine's per-message member lookups from a cache (see createMemberCache)
+  const members = createMemberCache(async (roomId) => {
+    const resp = (await client.doRequest('GET', `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/members`)) as {
+      chunk?: unknown[] | null;
+    };
+    return (resp.chunk ?? []).filter(isRecord).map((e) => new MembershipEvent(e));
+  });
+  const originalMembers = client.getRoomMembersByMembership.bind(client);
+  client.getRoomMembersByMembership = (roomId, membership, atToken) =>
+    atToken ? originalMembers(roomId, membership, atToken) : members.byMembership(roomId, membership);
+
   const feeder = createSyncFeeder(crypto, opts.botUserId, deviceId);
   const rooms = createRoomEncryption(
     {
@@ -264,7 +276,10 @@ export async function initBotCrypto(opts: BotCryptoOptions): Promise<BotCrypto> 
   return {
     client,
     deviceId,
-    handleTransaction: feeder.feed,
+    handleTransaction: (body) => {
+      for (const roomId of memberEventRooms(body)) members.invalidate(roomId);
+      feeder.feed(body);
+    },
     rooms,
     refreshDevices: feeder.markChanged,
   };
@@ -318,6 +333,8 @@ type SyncFeeder = {
   idle(): Promise<void>;
 };
 
+const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+
 /**
  * Returns handlers that feed the bot device's crypto data to the engine, one update at a time.
  */
@@ -328,6 +345,7 @@ export function createSyncFeeder(crypto: SyncDataSink, userId: string, deviceId:
   // no fallback key types at all; the engine needs an array, so they start empty.
   let lastOtkCounts: Record<string, number> = {};
   let lastFallback: string[] = [];
+  let fedOnce = false;
 
   const enqueue = (toDevice: Record<string, unknown>[], changed: string[], left: string[]) => {
     const otkCounts = lastOtkCounts;
@@ -347,11 +365,21 @@ export function createSyncFeeder(crypto: SyncDataSink, userId: string, deviceId:
     const data = extractCryptoSyncData(body, userId, deviceId);
     if (!data) return;
     if (data.encryptedEvents) console.log(`[crypto] transaction with ${data.encryptedEvents} encrypted event(s)`);
-    if (data.otkCounts) lastOtkCounts = data.otkCounts;
-    if (data.unusedFallbackKeyTypes) lastFallback = data.unusedFallbackKeyTypes;
-    const hasSync =
-      data.toDevice.length || data.changed.length || data.left.length || data.otkCounts || data.unusedFallbackKeyTypes;
-    if (!hasSync) return;
+    // hungryserv repeats the key counts in every transaction (receipts and typing too).
+    // Feeding unchanged counts tells the engine nothing new but holds the lock that
+    // encrypting a message waits for, so only changes are fed.
+    let keysChanged = false;
+    if (data.otkCounts && !sameJson(data.otkCounts, lastOtkCounts)) {
+      lastOtkCounts = data.otkCounts;
+      keysChanged = true;
+    }
+    if (data.unusedFallbackKeyTypes && !sameJson(data.unusedFallbackKeyTypes, lastFallback)) {
+      lastFallback = data.unusedFallbackKeyTypes;
+      keysChanged = true;
+    }
+    if (!fedOnce && (data.otkCounts || data.unusedFallbackKeyTypes)) keysChanged = true;
+    if (!data.toDevice.length && !data.changed.length && !data.left.length && !keysChanged) return;
+    fedOnce = true;
     enqueue(data.toDevice, data.changed, data.left);
   };
 
@@ -362,6 +390,70 @@ export function createSyncFeeder(crypto: SyncDataSink, userId: string, deviceId:
     },
     idle: () => queue,
   };
+}
+
+/** A room member as the crypto engine reads it (bot-sdk's `MembershipEvent`). */
+export type RoomMember = { membershipFor: string; membership: string };
+
+/** Cached room member lists for the crypto engine; see {@link createMemberCache}. */
+export type MemberCache<M extends RoomMember> = {
+  /** Members of a room with this membership, from the cache when it is fresh. */
+  byMembership(roomId: string, membership: string): Promise<M[]>;
+  /** Forgets a room, so its next lookup fetches the members again. */
+  invalidate(roomId: string): void;
+};
+
+/** How long a room's member list is trusted without a membership event. */
+export const MEMBER_CACHE_TTL_MS = 10 * 60_000;
+
+/**
+ * Caches room members for the crypto engine. bot-sdk asks the homeserver for the members
+ * (once per membership type) before encrypting every message, which costs two round trips
+ * per bridged message. The bridge sees every membership change in its transactions, so it
+ * invalidates the room there; the TTL is a safety net for anything it misses.
+ *
+ * @param fetchMembers - Fetches all members of a room (any membership).
+ * @param ttlMs - How long a fetched list stays fresh.
+ * @param now - Clock, for tests.
+ */
+export function createMemberCache<M extends RoomMember>(
+  fetchMembers: (roomId: string) => Promise<M[]>,
+  ttlMs: number = MEMBER_CACHE_TTL_MS,
+  now: () => number = Date.now,
+): MemberCache<M> {
+  const entries = new Map<string, { members: Promise<M[]>; expires: number }>();
+
+  const load = (roomId: string): Promise<M[]> => {
+    const cached = entries.get(roomId);
+    if (cached && cached.expires > now()) return cached.members;
+    const members = fetchMembers(roomId);
+    const entry = { members, expires: now() + ttlMs };
+    entries.set(roomId, entry);
+    // A failed fetch is not cached; neither is one that a membership change made stale
+    members.catch(() => {
+      if (entries.get(roomId) === entry) entries.delete(roomId);
+    });
+    return members;
+  };
+
+  return {
+    byMembership: async (roomId, membership) => (await load(roomId)).filter((m) => m.membership === membership),
+    invalidate: (roomId) => void entries.delete(roomId),
+  };
+}
+
+/**
+ * Lists the rooms with `m.room.member` events in an appservice transaction.
+ *
+ * @param body - The transaction JSON.
+ */
+export function memberEventRooms(body: Record<string, unknown>): string[] {
+  const events = Array.isArray(body.events) ? body.events : [];
+  const rooms = new Set<string>();
+  for (const e of events) {
+    if (isRecord(e) && e.type === 'm.room.member' && typeof e.room_id === 'string') rooms.add(e.room_id);
+  }
+  return [...rooms];
 }
 
 /** The part of bot-sdk's `CryptoClient` that {@link createRoomEncryption} uses. */

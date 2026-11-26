@@ -132,6 +132,13 @@ voice|video`), the same as mautrix-meta does since November 2026; the body ("Cuá
 
 ### Fixed
 
+- Messages from Zalo arrived later in encrypted rooms than in plain ones. Before every
+  encrypted message bot-sdk fetched the room's members from the homeserver twice (joined and
+  invited), about 0.5 s on a Beeper round trip, and the invited lookup failed on hungryserv's
+  `null` member list with a warning each time. Member lists are now cached per room and
+  refreshed when a membership event arrives (10-minute safety TTL), and appservice
+  transactions that only repeat unchanged one-time key counts no longer take the crypto lock
+  that encryption waits for.
 - The completeness audit could pass, and `--remove-old` delete the old room, while photos
   had become text in the rebuilt room. The rebuild had already moved every store row out of
   the old room, and a chat missing from `--baseline-db` had no baseline rows, so the audit

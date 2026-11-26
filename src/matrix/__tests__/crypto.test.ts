@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createCryptoAppService,
+  createMemberCache,
   createRoomEncryption,
   createSyncFeeder,
   decryptAttachment,
   encryptAttachment,
   extractCryptoSyncData,
   installEncryptedSend,
+  memberEventRooms,
   prepareIncomingEvent,
   type RoomEncryption,
   type RoomCryptoEngine,
@@ -416,5 +418,94 @@ describe('prepareIncomingEvent', () => {
     const r = rooms();
     const ev = { type: 'm.room.message', sender: '@owner:x' };
     expect(await prepareIncomingEvent(ev, deps(r))).toBe(ev);
+  });
+});
+
+describe('createSyncFeeder skipping', () => {
+  it('skips transactions that only repeat the last key counts', async () => {
+    const updateSyncData = vi.fn().mockResolvedValue(undefined);
+    const feeder = createSyncFeeder({ updateSyncData }, BOT, DEVICE);
+    const counts = (n: number) => ({
+      device_one_time_keys_count: { [BOT]: { [DEVICE]: { signed_curve25519: n } } },
+      device_unused_fallback_key_types: { [BOT]: { [DEVICE]: ['signed_curve25519'] } },
+    });
+    feeder.feed(counts(50));
+    feeder.feed(counts(50)); // unchanged: nothing new for the engine
+    feeder.feed({ ...counts(50), events: [{ type: 'm.room.encrypted', room_id: '!r:x' }] }); // still nothing new
+    feeder.feed(counts(49)); // changed
+    await feeder.idle();
+    expect(updateSyncData).toHaveBeenCalledTimes(2);
+    expect(updateSyncData.mock.calls[1]![1]).toEqual({ signed_curve25519: 49 });
+  });
+});
+
+describe('memberEventRooms', () => {
+  it('lists the rooms whose membership changed in a transaction', () => {
+    expect(
+      memberEventRooms({
+        events: [
+          { type: 'm.room.member', room_id: '!a:x', state_key: '@u:x' },
+          { type: 'm.room.message', room_id: '!b:x' },
+          { type: 'm.room.member', room_id: '!a:x', state_key: '@v:x' },
+          { type: 'm.room.member', room_id: '!c:x', state_key: '@u:x' },
+        ],
+      }),
+    ).toEqual(['!a:x', '!c:x']);
+    expect(memberEventRooms({})).toEqual([]);
+  });
+});
+
+describe('createMemberCache', () => {
+  const member = (userId: string, membership: string) => ({ membershipFor: userId, membership });
+
+  it('fetches a room once for every membership type and filters locally', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValue([member('@a:x', 'join'), member('@b:x', 'invite'), member('@c:x', 'leave')]);
+    const cache = createMemberCache(fetch);
+    const [joined, invited] = await Promise.all([
+      cache.byMembership('!r:x', 'join'),
+      cache.byMembership('!r:x', 'invite'),
+    ]);
+    expect(joined.map((m) => m.membershipFor)).toEqual(['@a:x']);
+    expect(invited.map((m) => m.membershipFor)).toEqual(['@b:x']);
+    await cache.byMembership('!r:x', 'join');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('fetches again after a membership change or once the entry expires', async () => {
+    let now = 0;
+    const fetch = vi.fn().mockResolvedValue([member('@a:x', 'join')]);
+    const cache = createMemberCache(fetch, 1_000, () => now);
+    await cache.byMembership('!r:x', 'join');
+    cache.invalidate('!r:x');
+    await cache.byMembership('!r:x', 'join');
+    now = 1_001;
+    await cache.byMembership('!r:x', 'join');
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not cache a failed fetch', async () => {
+    const fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockResolvedValue([member('@a:x', 'join')]);
+    const cache = createMemberCache(fetch);
+    await expect(cache.byMembership('!r:x', 'join')).rejects.toThrow('timeout');
+    expect(await cache.byMembership('!r:x', 'join')).toHaveLength(1);
+  });
+
+  it('drops a fetch that was in flight when the room changed', async () => {
+    let resolveFirst: (v: unknown[]) => void = () => undefined;
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((r) => (resolveFirst = r)))
+      .mockResolvedValue([member('@new:x', 'join')]);
+    const cache = createMemberCache(fetch);
+    const first = cache.byMembership('!r:x', 'join');
+    cache.invalidate('!r:x');
+    resolveFirst([member('@old:x', 'join')]);
+    await first;
+    expect((await cache.byMembership('!r:x', 'join')).map((m) => m.membershipFor)).toEqual(['@new:x']);
   });
 });
