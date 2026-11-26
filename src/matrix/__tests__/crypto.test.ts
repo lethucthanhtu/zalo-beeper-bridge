@@ -8,6 +8,7 @@ import {
   encryptAttachment,
   extractCryptoSyncData,
   installEncryptedSend,
+  installMemberInvalidation,
   memberEventRooms,
   prepareIncomingEvent,
   type RoomEncryption,
@@ -437,6 +438,35 @@ describe('createSyncFeeder skipping', () => {
     expect(updateSyncData).toHaveBeenCalledTimes(2);
     expect(updateSyncData.mock.calls[1]![1]).toEqual({ signed_curve25519: 49 });
   });
+
+  it('feeds to-device messages even when the key counts are unchanged', async () => {
+    const updateSyncData = vi.fn().mockResolvedValue(undefined);
+    const feeder = createSyncFeeder({ updateSyncData }, BOT, DEVICE);
+    const counts = { device_one_time_keys_count: { [BOT]: { [DEVICE]: { signed_curve25519: 50 } } } };
+    feeder.feed(counts);
+    feeder.feed({
+      ...counts,
+      'de.sorunome.msc2409.to_device': [{ type: 'm.room_key', to_user_id: BOT, to_device_id: DEVICE }],
+    });
+    await feeder.idle();
+    expect(updateSyncData).toHaveBeenCalledTimes(2);
+    expect(updateSyncData.mock.calls[1]![0]).toHaveLength(1);
+  });
+
+  it('feeds the same key counts again after a failed update', async () => {
+    const updateSyncData = vi.fn().mockRejectedValueOnce(new Error('store busy')).mockResolvedValue(undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const feeder = createSyncFeeder({ updateSyncData }, BOT, DEVICE);
+    const counts = { device_one_time_keys_count: { [BOT]: { [DEVICE]: { signed_curve25519: 50 } } } };
+    feeder.feed(counts);
+    await feeder.idle();
+    feeder.feed(counts); // the engine never got these
+    await feeder.idle();
+    feeder.feed(counts); // now it has
+    await feeder.idle();
+    expect(updateSyncData).toHaveBeenCalledTimes(2);
+    error.mockRestore();
+  });
 });
 
 describe('memberEventRooms', () => {
@@ -507,5 +537,71 @@ describe('createMemberCache', () => {
     resolveFirst([member('@old:x', 'join')]);
     await first;
     expect((await cache.byMembership('!r:x', 'join')).map((m) => m.membershipFor)).toEqual(['@new:x']);
+  });
+});
+
+describe('createMemberCache failures', () => {
+  it('keeps a newer fetch when an older one fails', async () => {
+    let failOld!: (err: Error) => void;
+    const fetch = vi
+      .fn()
+      .mockReturnValueOnce(new Promise((_, reject) => (failOld = reject)))
+      .mockResolvedValue([{ membershipFor: '@a:x', membership: 'join' }]);
+    const cache = createMemberCache(fetch);
+    const old = cache.byMembership('!r:x', 'join');
+    cache.invalidate('!r:x');
+    await cache.byMembership('!r:x', 'join'); // second fetch, now cached
+    failOld(new Error('gone'));
+    await expect(old).rejects.toThrow('gone');
+    await cache.byMembership('!r:x', 'join');
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('installMemberInvalidation', () => {
+  const makeProto = () => ({
+    inviteUser: vi.fn().mockResolvedValue({}),
+    kickUser: vi.fn().mockResolvedValue({}),
+    banUser: vi.fn().mockResolvedValue({}),
+    unbanUser: vi.fn().mockResolvedValue({}),
+    joinRoom: vi.fn().mockResolvedValue('!joined:x'),
+    leaveRoom: vi.fn().mockResolvedValue({}),
+    sendStateEvent: vi.fn().mockResolvedValue('$state'),
+  });
+
+  it('forgets the room after every membership change the bridge makes', async () => {
+    const proto = makeProto();
+    const invalidate = vi.fn();
+    installMemberInvalidation(proto, invalidate);
+    await proto.inviteUser('@u:x', '!a:x');
+    await proto.kickUser('@u:x', '!b:x');
+    await proto.banUser('@u:x', '!c:x');
+    await proto.unbanUser('@u:x', '!d:x');
+    await proto.leaveRoom('!e:x');
+    await proto.joinRoom('#alias:x'); // the room id comes from the result
+    await proto.sendStateEvent('!f:x', 'm.room.member', '@u:x', { membership: 'join' });
+    await proto.sendStateEvent('!g:x', 'm.room.name', '', { name: 'n' });
+    expect(invalidate.mock.calls.map((c) => c[0])).toEqual([
+      '!a:x',
+      '!b:x',
+      '!c:x',
+      '!d:x',
+      '!e:x',
+      '!joined:x',
+      '!f:x',
+    ]);
+  });
+
+  it('passes the call through and forgets the room even when it fails', async () => {
+    const proto = makeProto();
+    const original = proto.inviteUser;
+    original.mockRejectedValueOnce(new Error('timeout'));
+    const invalidate = vi.fn();
+    const restore = installMemberInvalidation(proto, invalidate);
+    await expect(proto.inviteUser('@u:x', '!a:x')).rejects.toThrow('timeout');
+    expect(original).toHaveBeenCalledWith('@u:x', '!a:x');
+    expect(invalidate).toHaveBeenCalledWith('!a:x');
+    restore();
+    expect(proto.inviteUser).toBe(original);
   });
 });

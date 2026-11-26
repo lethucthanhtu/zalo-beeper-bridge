@@ -163,6 +163,8 @@ export type BotCrypto = {
   handleTransaction(body: Record<string, unknown>): void;
   /** Encrypts and decrypts room events with the bot device. */
   rooms: RoomEncryption;
+  /** Forgets a room's cached members, after the bridge changed a membership in it. */
+  invalidateMembers(roomId: string): void;
   /** Asks the engine to query these users' devices again (hungryserv sends no device_lists). */
   refreshDevices(userIds: string[]): void;
 };
@@ -253,7 +255,10 @@ export async function initBotCrypto(opts: BotCryptoOptions): Promise<BotCrypto> 
     const resp = (await client.doRequest('GET', `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/members`)) as {
       chunk?: unknown[] | null;
     };
-    return (resp.chunk ?? []).filter(isRecord).map((e) => new MembershipEvent(e));
+    // A member event without a membership would make the engine's filter throw
+    return (resp.chunk ?? [])
+      .filter((e) => isRecord(e) && isRecord(e.content) && typeof e.content.membership === 'string')
+      .map((e) => new MembershipEvent(e));
   });
   const originalMembers = client.getRoomMembersByMembership.bind(client);
   client.getRoomMembersByMembership = (roomId, membership, atToken) =>
@@ -276,6 +281,7 @@ export async function initBotCrypto(opts: BotCryptoOptions): Promise<BotCrypto> 
   return {
     client,
     deviceId,
+    invalidateMembers: members.invalidate,
     handleTransaction: (body) => {
       for (const roomId of memberEventRooms(body)) members.invalidate(roomId);
       feeder.feed(body);
@@ -333,8 +339,6 @@ type SyncFeeder = {
   idle(): Promise<void>;
 };
 
-const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
-
 /**
  * Returns handlers that feed the bot device's crypto data to the engine, one update at a time.
  */
@@ -345,11 +349,13 @@ export function createSyncFeeder(crypto: SyncDataSink, userId: string, deviceId:
   // no fallback key types at all; the engine needs an array, so they start empty.
   let lastOtkCounts: Record<string, number> = {};
   let lastFallback: string[] = [];
-  let fedOnce = false;
+  // The key counts the engine last received, or null when it has none (start, or a failed update)
+  let fedKeys: string | null = null;
 
   const enqueue = (toDevice: Record<string, unknown>[], changed: string[], left: string[]) => {
     const otkCounts = lastOtkCounts;
     const fallback = lastFallback;
+    const keys = JSON.stringify([otkCounts, fallback]);
     queue = queue
       .then(() => crypto.updateSyncData(toDevice, otkCounts, fallback, changed, left))
       .then(() => {
@@ -358,7 +364,11 @@ export function createSyncFeeder(crypto: SyncDataSink, userId: string, deviceId:
           console.log(`[crypto] processed ${toDevice.length} to-device message(s): ${types}`);
         }
       })
-      .catch((err: unknown) => console.error('[crypto] sync data update failed:', err));
+      .catch((err: unknown) => {
+        // Let the next transaction feed these counts again
+        if (fedKeys === keys) fedKeys = null;
+        console.error('[crypto] sync data update failed:', err);
+      });
   };
 
   const feed = (body: Record<string, unknown>) => {
@@ -368,18 +378,13 @@ export function createSyncFeeder(crypto: SyncDataSink, userId: string, deviceId:
     // hungryserv repeats the key counts in every transaction (receipts and typing too).
     // Feeding unchanged counts tells the engine nothing new but holds the lock that
     // encrypting a message waits for, so only changes are fed.
-    let keysChanged = false;
-    if (data.otkCounts && !sameJson(data.otkCounts, lastOtkCounts)) {
-      lastOtkCounts = data.otkCounts;
-      keysChanged = true;
-    }
-    if (data.unusedFallbackKeyTypes && !sameJson(data.unusedFallbackKeyTypes, lastFallback)) {
-      lastFallback = data.unusedFallbackKeyTypes;
-      keysChanged = true;
-    }
-    if (!fedOnce && (data.otkCounts || data.unusedFallbackKeyTypes)) keysChanged = true;
+    if (data.otkCounts) lastOtkCounts = data.otkCounts;
+    if (data.unusedFallbackKeyTypes) lastFallback = data.unusedFallbackKeyTypes;
+    const keys = JSON.stringify([lastOtkCounts, lastFallback]);
+    const hasKeys = data.otkCounts !== null || data.unusedFallbackKeyTypes !== null;
+    const keysChanged = hasKeys && keys !== fedKeys;
     if (!data.toDevice.length && !data.changed.length && !data.left.length && !keysChanged) return;
-    fedOnce = true;
+    if (hasKeys) fedKeys = keys;
     enqueue(data.toDevice, data.changed, data.left);
   };
 
@@ -653,5 +658,67 @@ export function installEncryptedSend(proto: SendingClient, rooms: RoomEncryption
   };
   return () => {
     proto.sendEvent = original;
+  };
+}
+
+/** The `MatrixClient` membership methods {@link installMemberInvalidation} wraps. */
+export type MembershipClient = {
+  inviteUser(userId: string, roomId: string): Promise<unknown>;
+  kickUser(userId: string, roomId: string, reason?: string): Promise<unknown>;
+  banUser(userId: string, roomId: string, reason?: string): Promise<unknown>;
+  unbanUser(userId: string, roomId: string): Promise<unknown>;
+  joinRoom(roomIdOrAlias: string, viaServers?: string[]): Promise<string>;
+  leaveRoom(roomId: string, reason?: string): Promise<unknown>;
+  sendStateEvent(roomId: string, type: string, stateKey: string, content: unknown): Promise<string>;
+};
+
+/**
+ * Forgets a room's cached members whenever a bridge client changes a membership in it.
+ * The member cache is otherwise refreshed by the membership events in appservice
+ * transactions, and the bridge cannot count on the homeserver echoing its own changes;
+ * a join or invite that the cache missed would leave the new member without the room key.
+ * The room is forgotten even when the call fails, since the change may still have happened.
+ *
+ * @param proto - `MatrixClient.prototype` (shared by all intents of the bridge library).
+ * @param invalidate - Forgets one room's members.
+ * @returns A function that restores the original methods.
+ */
+export function installMemberInvalidation(proto: MembershipClient, invalidate: (roomId: string) => void): () => void {
+  const originals = {
+    inviteUser: proto.inviteUser,
+    kickUser: proto.kickUser,
+    banUser: proto.banUser,
+    unbanUser: proto.unbanUser,
+    joinRoom: proto.joinRoom,
+    leaveRoom: proto.leaveRoom,
+    sendStateEvent: proto.sendStateEvent,
+  };
+  // An alias is resolved by the join itself; the room id comes back in its result
+  const forget = (roomId: unknown) => {
+    if (typeof roomId === 'string' && roomId.startsWith('!')) invalidate(roomId);
+  };
+  const wrap = <A extends unknown[], R>(
+    original: (this: MembershipClient, ...args: A) => Promise<R>,
+    roomOf: (args: A) => unknown,
+  ) =>
+    async function (this: MembershipClient, ...args: A): Promise<R> {
+      try {
+        const result = await original.apply(this, args);
+        forget(result); // joinRoom's room id; other results are never a room id
+        return result;
+      } finally {
+        forget(roomOf(args));
+      }
+    };
+
+  proto.inviteUser = wrap(originals.inviteUser, (a) => a[1]);
+  proto.kickUser = wrap(originals.kickUser, (a) => a[1]);
+  proto.banUser = wrap(originals.banUser, (a) => a[1]);
+  proto.unbanUser = wrap(originals.unbanUser, (a) => a[1]);
+  proto.joinRoom = wrap(originals.joinRoom, (a) => a[0]);
+  proto.leaveRoom = wrap(originals.leaveRoom, (a) => a[0]);
+  proto.sendStateEvent = wrap(originals.sendStateEvent, (a) => (a[1] === 'm.room.member' ? a[0] : undefined));
+  return () => {
+    Object.assign(proto, originals);
   };
 }

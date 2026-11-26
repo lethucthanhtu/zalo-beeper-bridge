@@ -22,8 +22,10 @@ import {
   decryptAttachment,
   initBotCrypto,
   installEncryptedSend,
+  installMemberInvalidation,
   prepareIncomingEvent,
   type RoomEncryption,
+  type MembershipClient,
   type SendingClient,
 } from './matrix/crypto.ts';
 import { AVATAR_MAX_BYTES, createZaloStatePublisher } from './matrix/beeper-bridge-state.ts';
@@ -336,6 +338,8 @@ if (config.encryption.enabled) {
     roomCrypto = botCrypto.rooms;
     // Ghost and bot clients share bot-sdk's MatrixClient: encrypt their sends in encrypted rooms
     installEncryptedSend(MatrixClient.prototype as unknown as SendingClient, botCrypto.rooms);
+    // The member cache must not miss the bridge's own joins and invites (room keys go to members)
+    installMemberInvalidation(MatrixClient.prototype as unknown as MembershipClient, botCrypto.invalidateMembers);
     // hungryserv sends no device_lists: re-query the owner's devices now and then so new
     // Beeper logins receive room keys
     const refreshOwnerDevices = () => botCrypto.refreshDevices([config.matrix.owner]);
